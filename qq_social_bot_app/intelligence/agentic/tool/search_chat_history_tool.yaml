@@ -1,0 +1,21 @@
+name: 'search_chat_history_tool'
+description: |
+  搜索群聊的历史消息记录。消息以JSONL文件存储，按群组/日期/小时组织。
+  当你需要回忆更早的对话内容、查找某人说过的话、或搜索特定话题的历史讨论时使用此工具。
+
+  参数说明:
+    group_id: 群组ID（必填）
+    keyword: 搜索关键词，支持正则表达式（必填）
+    date: 日期过滤，格式 "YYYY-MM-DD"（具体某天）或 "YYYY-MM"（某月），可选
+    sender: 按发送者名字过滤，可选
+
+  使用示例:
+    - 搜索某群中关于"Python"的讨论: group_id="group_123", keyword="Python"
+    - 搜索张三在3月4日说过的话: group_id="group_123", keyword=".", date="2026-03-04", sender="张三"
+    - 搜索上个月关于聚餐的讨论: group_id="group_123", keyword="聚餐", date="2026-02"
+tool_type: 'api'
+input_keys: ['group_id', 'keyword']
+metadata:
+  type: 'TOOL'
+  module: 'qq_social_bot_app.intelligence.agentic.tool.search_chat_history_tool'
+  class: 'SearchChatHistoryTool'

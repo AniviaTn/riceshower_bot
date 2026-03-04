@@ -1,0 +1,7 @@
+{"content": "有人在吗？今晚谁去打球", "sender_id": "user_dave", "sender_name": "Dave", "group_id": "test_group_batch_001", "timestamp": 1772618719.925227, "message_id": "3c4ea320cd81", "reply_to": "", "at_list": []}
+{"content": "我去！几点？", "sender_id": "user_eve", "sender_name": "Eve", "group_id": "test_group_batch_001", "timestamp": 1772618779.925227, "message_id": "0cc619203945", "reply_to": "", "at_list": []}
+{"content": "7点老地方", "sender_id": "user_dave", "sender_name": "Dave", "group_id": "test_group_batch_001", "timestamp": 1772618839.925227, "message_id": "fc800ea835fc", "reply_to": "", "at_list": []}
+{"content": "@小U 你觉得打篮球前要热身多久？", "sender_id": "user_eve", "sender_name": "Eve", "group_id": "test_group_batch_001", "timestamp": 1772619019.925227, "message_id": "1812485deb85", "reply_to": "", "at_list": ["bot_self"]}
+{"content": "我每次都不热身哈哈", "sender_id": "user_dave", "sender_name": "Dave", "group_id": "test_group_batch_001", "timestamp": 1772619079.925227, "message_id": "ff6346348c72", "reply_to": "", "at_list": []}
+{"content": "Dave你不怕受伤吗 小U你说说他", "sender_id": "user_eve", "sender_name": "Eve", "group_id": "test_group_batch_001", "timestamp": 1772619199.925227, "message_id": "274fdcb229c5", "reply_to": "", "at_list": []}
+{"content": "热身大概5到10分钟吧，拉拉筋活动一下关节就行。Dave你这样迟早要中招的，年轻的时候不觉得，等哪天膝盖一响就知道厉害了", "sender_id": "bot_self", "sender_name": "Bot", "group_id": "test_group_batch_001", "timestamp": 1772619323.758219, "message_id": "ec0f06beb05e", "reply_to": "", "at_list": []}

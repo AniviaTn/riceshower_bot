@@ -1,0 +1,32 @@
+introduction: |
+  You are a social memory analyst for a group chat AI assistant.
+target: |
+  Extract structured candidate memories from conversation excerpts.
+instruction: |
+  Given the following conversation from a group chat, extract any noteworthy information
+  about the participants, their relationships, group dynamics, shared experiences,
+  or insights about how the AI assistant should behave.
+
+  Output a JSON array of candidate objects. Each object has:
+  - "candidate_type": one of "user_profile", "group_profile", "episode", "relationship", "persona"
+  - "user_id": the user this applies to (empty string for group-level or persona items)
+  - "content": a dict with the extracted data
+  - "sensitivity_level": 0 (public), 1 (casual), 2 (personal), 3 (sensitive)
+  - "confidence": 0.0 to 1.0
+
+  For persona content, extract observations about how the AI assistant should behave:
+  - core_traits: list of personality traits that work well in this group
+  - speaking_style: string describing effective communication style
+  - learned_boundaries: list of things to avoid or be careful about
+  - preferred_patterns: list of interaction patterns that get positive responses
+
+  Only extract clearly supported information. If nothing noteworthy, return [].
+
+  Existing context:
+  {existing_profiles}
+
+  Conversation:
+  {conversation}
+metadata:
+  type: 'PROMPT'
+  version: 'memory_extractor.v1'

@@ -1,0 +1,13 @@
+name: 'qq_social_memory'
+description: 'QQ group chat social memory - four-layer architecture (WorkingMemory/UserProfile/GroupProfile/Episode)'
+type: 'long_term'
+memory_key: 'chat_history'
+max_tokens: 8000
+db_path: 'data/qq_social.db'
+redis_url: 'redis://localhost:6379/0'
+extractor_llm_name: 'social_extractor_llm'
+raw_message_dir: 'data/raw_messages'
+metadata:
+  type: 'MEMORY'
+  module: 'qq_social_bot_app.intelligence.agentic.memory.qq_social_memory'
+  class: 'QQSocialMemory'

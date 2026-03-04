@@ -1,0 +1,7 @@
+{"content": "老王今天怎么没来？", "sender_id": "user_helen", "sender_name": "Helen", "group_id": "test_group_alias_001", "timestamp": 1772619030.340092, "message_id": "e26114187444", "reply_to": "", "at_list": []}
+{"content": "老王说他加班，晚点到", "sender_id": "user_ivan", "sender_name": "Ivan", "group_id": "test_group_alias_001", "timestamp": 1772619090.340092, "message_id": "4f7bfebc9df7", "reply_to": "", "at_list": []}
+{"content": "胖虎你帮我带杯咖啡呗", "sender_id": "user_helen", "sender_name": "Helen", "group_id": "test_group_alias_001", "timestamp": 1772619150.340092, "message_id": "e1ed183b4e8a", "reply_to": "", "at_list": []}
+{"content": "没问题！老王要不要也带一杯？", "sender_id": "user_ivan", "sender_name": "Ivan", "group_id": "test_group_alias_001", "timestamp": 1772619210.340092, "message_id": "054374a9611d", "reply_to": "", "at_list": []}
+{"content": "来了来了，胖虎帮我也带一杯美式，谢啦", "sender_id": "user_wang", "sender_name": "Wang", "group_id": "test_group_alias_001", "timestamp": 1772619270.340092, "message_id": "f1d438e13e04", "reply_to": "", "at_list": []}
+{"content": "@小U 你觉得加班的时候喝什么提神？", "sender_id": "user_wang", "sender_name": "Wang", "group_id": "test_group_alias_001", "timestamp": 1772619330.340092, "message_id": "b89063cb6a43", "reply_to": "", "at_list": ["bot_self"]}
+{"content": "嗯……如果是加班的话，我觉得美式确实挺好的，不会太甜，喝起来比较清醒。\n\n不过如果喝太多咖啡会心慌的话，热茶也可以试试……普洱或者乌龙那种，不容易睡不着。\n\n老王你今天加班辛苦了。", "sender_id": "bot_self", "sender_name": "Bot", "group_id": "test_group_alias_001", "timestamp": 1772619335.455797, "message_id": "c2e733d3818e", "reply_to": "", "at_list": []}

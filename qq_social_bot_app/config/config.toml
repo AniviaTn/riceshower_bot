@@ -1,0 +1,29 @@
+[BASE_INFO]
+appname = 'qq_social_bot_app'
+
+[PACKAGE_PATH_INFO]
+ROOT_PACKAGE = 'qq_social_bot_app'
+
+[CORE_PACKAGE]
+default = ['${ROOT_PACKAGE}.intelligence.agentic']
+agent = ['${ROOT_PACKAGE}.intelligence.agentic.agent']
+llm = ['${ROOT_PACKAGE}.intelligence.agentic.llm']
+llm_channel = ['${ROOT_PACKAGE}.intelligence.agentic.llm']
+tool = ['${ROOT_PACKAGE}.intelligence.agentic.tool']
+memory = ['${ROOT_PACKAGE}.intelligence.agentic.memory']
+prompt = ['${ROOT_PACKAGE}.intelligence.agentic.prompt']
+
+[SUB_CONFIG_PATH]
+log_config_path = './log_config.toml'
+custom_key_path = './custom_key.toml'
+
+[DB]
+system_db_uri = ''
+
+[GUNICORN]
+activate = 'false'
+
+[GRPC]
+activate = 'false'
+max_workers = 10
+server_port = 50051
