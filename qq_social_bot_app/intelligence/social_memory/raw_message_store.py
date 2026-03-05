@@ -13,6 +13,8 @@ import os
 import time
 from typing import List
 
+import aiofiles
+
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
 
 # Anchor to qq_social_bot_app/ root so the path is deterministic
@@ -30,7 +32,7 @@ class RawMessageStore:
         self._base_dir = base_dir
 
     # ----------------------------------------------------------
-    # Write
+    # Write (sync)
     # ----------------------------------------------------------
 
     def append(self, msg: GroupMessage) -> str:
@@ -54,6 +56,32 @@ class RawMessageStore:
             with open(path, 'a', encoding='utf-8') as f:
                 for msg in group_msgs:
                     f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + '\n')
+
+    # ----------------------------------------------------------
+    # Write (async)
+    # ----------------------------------------------------------
+
+    async def async_append(self, msg: GroupMessage) -> str:
+        """Append a single message asynchronously.  Returns the file path written to."""
+        path = self._resolve_path(msg.group_id, msg.timestamp)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        line = json.dumps(msg.to_dict(), ensure_ascii=False)
+        async with aiofiles.open(path, 'a', encoding='utf-8') as f:
+            await f.write(line + '\n')
+        return path
+
+    async def async_append_batch(self, msgs: List[GroupMessage]) -> None:
+        """Append multiple messages asynchronously, grouping writes by file path."""
+        by_path: dict[str, list] = {}
+        for msg in msgs:
+            path = self._resolve_path(msg.group_id, msg.timestamp)
+            by_path.setdefault(path, []).append(msg)
+
+        for path, group_msgs in by_path.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            async with aiofiles.open(path, 'a', encoding='utf-8') as f:
+                for msg in group_msgs:
+                    await f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + '\n')
 
     # ----------------------------------------------------------
     # Path helpers

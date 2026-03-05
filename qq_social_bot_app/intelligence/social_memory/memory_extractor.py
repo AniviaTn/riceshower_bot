@@ -3,6 +3,7 @@
 Uses a lightweight LLM (e.g. Haiku) to extract structured candidate memories
 from recent messages, then stores them in the CandidateMemory buffer.
 """
+import asyncio
 import json
 import logging
 import time
@@ -93,6 +94,36 @@ class MemoryExtractor:
             logger.exception('Memory extraction LLM call failed')
             return []
 
+    async def async_extract_candidates(self, messages: List[dict], group_id: str,
+                                       existing_profiles: dict = None) -> List[dict]:
+        """Async version: call LLM via acall() to extract candidate memories."""
+        llm = self._get_llm()
+        if not llm:
+            logger.warning('Extractor LLM %s not found', self._llm_name)
+            return []
+
+        conversation_text = self._format_messages(messages)
+        context_parts = [f'群ID: {group_id}']
+        if existing_profiles:
+            context_parts.append(
+                f'已有用户画像（仅供参考）:\n{json.dumps(existing_profiles, ensure_ascii=False, indent=1)}')
+        context_parts.append(f'对话记录:\n{conversation_text}')
+        user_content = '\n\n'.join(context_parts)
+
+        llm_messages = [
+            {'role': 'system', 'content': EXTRACTION_SYSTEM_PROMPT},
+            {'role': 'user', 'content': user_content},
+        ]
+
+        try:
+            output = await llm.acall(messages=llm_messages, streaming=False)
+            raw_text = output.text if hasattr(output, 'text') else str(output)
+            candidates = self._parse_candidates(raw_text, group_id)
+            return candidates
+        except Exception:
+            logger.exception('Async memory extraction LLM call failed')
+            return []
+
     def consolidate_candidates(self, service: SocialMemoryService):
         """Promote candidates that have reached sufficient confidence.
 
@@ -148,6 +179,10 @@ class MemoryExtractor:
 
         # Clean up expired/promoted
         service.cleanup_expired_candidates()
+
+    async def async_consolidate_candidates(self, service: SocialMemoryService):
+        """Async version: wraps sync SQLite service calls with asyncio.to_thread()."""
+        await asyncio.to_thread(self.consolidate_candidates, service)
 
     # ----------------------------------------------------------
     # Internal helpers

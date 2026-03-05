@@ -6,71 +6,52 @@ import json
 import logging
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import uuid
+from collections import deque
 from datetime import datetime
 from typing import Any
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-# ---------------------------------------------------------------------------
-# Path setup – ensure the project root is importable
-# ---------------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
-# ---------------------------------------------------------------------------
-# AgentUniverse bootstrap (must happen before importing agent classes)
-# ---------------------------------------------------------------------------
 from agentuniverse.base.agentuniverse import AgentUniverse
 from agentuniverse.agent.agent_manager import AgentManager
-
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
 
 CONFIG_PATH = os.path.join(PROJECT_ROOT, 'qq_social_bot_app', 'config', 'config.toml')
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 HOST = "127.0.0.1"
 PORT = 8082
 EXPECTED_PATH = "/ws/onebot"
 
 BOT_ID = 'bot_self'
-BOT_NAMES = ['米浴']
-BOT_QQ_ID: int | None = None  # auto-detected from first event's self_id
+BOT_NAMES = ['米浴', '米宝', '神の人形']
+BOT_QQ_ID: int | None = None
+
+PERIODIC_CHECK_INTERVAL = 120  # seconds between periodic checks for buffered messages
+
+# Max bot message_ids to track (prevents unbounded growth)
+_MAX_BOT_MESSAGE_IDS = 500
 
 logger = logging.getLogger(__name__)
 
-# Thread pool for running synchronous agent.run() without blocking the event loop
-_executor = ThreadPoolExecutor(max_workers=4)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def is_group_message(evt: dict) -> bool:
-    """Only accept group chat messages."""
-    return (evt.get("post_type") == "message"
-            and evt.get("message_type") == "group")
+    return evt.get("post_type") == "message" and evt.get("message_type") == "group"
+
+
+def is_private_message(evt: dict) -> bool:
+    return evt.get("post_type") == "message" and evt.get("message_type") == "private"
 
 
 def parse_segments(segments: Any, bot_self_id: int | None) -> tuple[str, list[str], list[str], str]:
-    """Parse OneBot message segments into structured data.
-
-    Returns:
-        (text_content, at_list, image_urls, reply_to_message_id)
-
-    - text_content:  plain text with image placeholders like [图片]
-    - at_list:       list of user IDs being @'d (str); bot's self_id mapped to BOT_ID
-    - image_urls:    list of image HTTP URLs for multimodal
-    - reply_to:      message_id of the message being replied to, or ''
-    """
     if not isinstance(segments, list):
         return (str(segments) if segments else ''), [], [], ''
 
@@ -93,7 +74,6 @@ def parse_segments(segments: Any, bot_self_id: int | None) -> tuple[str, list[st
         elif seg_type == "at":
             qq = data.get("qq", "")
             if qq:
-                # Map bot's own QQ id to the logical BOT_ID
                 if bot_self_id and str(qq) == str(bot_self_id):
                     at_list.append(BOT_ID)
                 else:
@@ -108,7 +88,6 @@ def parse_segments(segments: Any, bot_self_id: int | None) -> tuple[str, list[st
 
         elif seg_type == "reply":
             reply_to = str(data.get("id", ""))
-            # Don't append text placeholder for reply – it's metadata
 
         elif seg_type == "file":
             text_parts.append("[文件]")
@@ -120,21 +99,13 @@ def parse_segments(segments: Any, bot_self_id: int | None) -> tuple[str, list[st
 
 
 def evt_to_group_message(evt: dict, bot_self_id: int | None) -> tuple[GroupMessage, list[str]]:
-    """Convert a OneBot group message event to (GroupMessage, image_urls).
-
-    The image_urls are returned separately because GroupMessage.content is str-only,
-    while the agent framework accepts image_urls as a separate parameter for
-    multimodal LLM calls.
-    """
     segments = evt.get("message", [])
     text, at_list, image_urls, reply_to = parse_segments(segments, bot_self_id)
 
-    # Fallback: if segment parsing produced empty text, use raw_message
     if not text:
         text = evt.get("raw_message", "") or ""
 
     sender = evt.get("sender", {}) or {}
-    # Prefer card (group nickname) over nickname
     sender_name = sender.get("card") or sender.get("nickname") or str(evt.get("user_id", ""))
 
     msg = GroupMessage(
@@ -150,24 +121,264 @@ def evt_to_group_message(evt: dict, bot_self_id: int | None) -> tuple[GroupMessa
     return msg, image_urls
 
 
-def run_agent_sync(agent, messages: list[GroupMessage],
-                   image_urls: list[str]) -> str:
-    """Call the agent synchronously (designed to be run in a thread pool)."""
+def evt_to_private_message(evt: dict, bot_self_id: int | None) -> tuple[GroupMessage, list[str]]:
+    segments = evt.get("message", [])
+    text, at_list, image_urls, reply_to = parse_segments(segments, bot_self_id)
+
+    if not text:
+        text = evt.get("raw_message", "") or ""
+
+    sender = evt.get("sender", {}) or {}
+    sender_name = sender.get("nickname") or str(evt.get("user_id", ""))
+    user_id = str(evt.get("user_id", ""))
+
+    if BOT_ID not in at_list:
+        at_list.append(BOT_ID)
+
+    msg = GroupMessage(
+        content=text,
+        sender_id=user_id,
+        sender_name=sender_name,
+        group_id=f"private_{user_id}",
+        timestamp=float(evt.get("time", 0)),
+        message_id=str(evt.get("message_id", "")),
+        reply_to=reply_to,
+        at_list=at_list,
+    )
+    return msg, image_urls
+
+
+def build_onebot_message(
+    text: str,
+    reply_to: str | None = None,
+    at_user_ids: list[str] | None = None,
+) -> list[dict]:
+    """构造 OneBot message segment 列表。"""
+    segments: list[dict] = []
+
+    if reply_to:
+        segments.append({
+            "type": "reply",
+            "data": {"id": str(reply_to)}
+        })
+
+    if at_user_ids:
+        for uid in at_user_ids:
+            segments.append({
+                "type": "at",
+                "data": {"qq": str(uid)}
+            })
+            segments.append({
+                "type": "text",
+                "data": {"text": " "}
+            })
+
+    if text:
+        segments.append({
+            "type": "text",
+            "data": {"text": text}
+        })
+
+    return segments
+
+
+def check_hard_rules(msg: GroupMessage, bot_id: str, bot_names: list[str],
+                     bot_message_ids: set[str]) -> bool:
+    """Check whether a group message triggers a hard rule requiring immediate reply.
+
+    Rules (first match wins):
+    1. bot_id in msg.at_list
+    2. @BotName in content
+    3. bot name mentioned in content (case-insensitive)
+    4. msg.reply_to is a bot message_id (local set lookup)
+    """
+    content = msg.content or ''
+
+    # Rule 1: bot was @'d via QQ at segment
+    if bot_id and bot_id in (msg.at_list or []):
+        return True
+
+    # Rule 2: @BotName in text
+    for name in bot_names:
+        if f'@{name}' in content:
+            return True
+
+    # Rule 3: bot name mentioned in text (case-insensitive)
+    content_lower = content.lower()
+    for name in bot_names:
+        if name.lower() in content_lower:
+            return True
+
+    # Rule 4: replying to a bot message
+    if msg.reply_to and msg.reply_to in bot_message_ids:
+        return True
+
+    return False
+
+
+class OneBotWSClient:
+    """基于当前 reverse websocket 连接发送 OneBot action，并等待 echo 对应响应。"""
+
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self._pending: dict[str, asyncio.Future] = {}
+        self.event_queue: asyncio.Queue = asyncio.Queue()
+
+    def handle_action_response(self, data: dict) -> bool:
+        echo = data.get("echo")
+        status = data.get("status")
+        if echo is None or status is None:
+            return False
+
+        fut = self._pending.pop(str(echo), None)
+        if fut and not fut.done():
+            fut.set_result(data)
+        return True
+
+    async def reader_loop(self):
+        """持续读取 WebSocket 消息，分发 action 响应和事件。"""
+        try:
+            async for raw_message in self.websocket:
+                try:
+                    evt = json.loads(raw_message)
+                except json.JSONDecodeError:
+                    continue
+                if not self.handle_action_response(evt):
+                    await self.event_queue.put(evt)
+        finally:
+            await self.event_queue.put(None)
+
+    async def call_action(self, action: str, params: dict, timeout: float = 20.0) -> dict:
+        echo = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[echo] = fut
+
+        payload = {
+            "action": action,
+            "params": params,
+            "echo": echo,
+        }
+
+        await self.websocket.send(json.dumps(payload, ensure_ascii=False))
+
+        try:
+            resp = await asyncio.wait_for(fut, timeout=timeout)
+            return resp
+        except asyncio.TimeoutError:
+            self._pending.pop(echo, None)
+            raise TimeoutError(f"OneBot action timeout: {action}")
+
+    async def send_group_msg(
+        self,
+        group_id: str | int,
+        text: str,
+        reply_to: str | None = None,
+        at_user_ids: list[str] | None = None,
+    ) -> dict:
+        message = build_onebot_message(text=text, reply_to=reply_to, at_user_ids=at_user_ids)
+        return await self.call_action(
+            "send_group_msg",
+            {
+                "group_id": int(group_id),
+                "message": message,
+            }
+        )
+
+    async def send_private_msg(
+        self,
+        user_id: str | int,
+        text: str,
+        reply_to: str | None = None,
+    ) -> dict:
+        message = build_onebot_message(text=text, reply_to=reply_to)
+        return await self.call_action(
+            "send_private_msg",
+            {
+                "user_id": int(user_id),
+                "message": message,
+            }
+        )
+
+
+async def run_agent_async(agent, messages: list[GroupMessage],
+                          must_reply: bool = True,
+                          onebot_client=None, send_scene: str = "group",
+                          trigger_message_id: str | None = None,
+                          bot_message_ids=None) -> str:
     kwargs = dict(
         messages=messages,
         bot_id=BOT_ID,
         bot_names=BOT_NAMES,
+        must_reply=must_reply,
+        onebot_client=onebot_client,
+        send_scene=send_scene,
+        trigger_message_id=trigger_message_id,
+        bot_message_ids=bot_message_ids,
     )
-    if image_urls:
-        kwargs['image_urls'] = image_urls
 
-    output = agent.run(**kwargs)
-    return output.get_data('output', '')
+    output = await agent.async_run(**kwargs)
+    return output.get_data("output", "")
 
 
-# ---------------------------------------------------------------------------
-# WebSocket handler
-# ---------------------------------------------------------------------------
+async def _handle_group_agent_call(
+    agent, onebot: OneBotWSClient,
+    group_id: str,
+    group_buffers: dict[str, list[GroupMessage]],
+    group_locks: dict[str, asyncio.Lock],
+    bot_message_ids: deque,
+    must_reply: bool,
+) -> None:
+    """Drain the buffer for a group and call agent."""
+    lock = group_locks.setdefault(group_id, asyncio.Lock())
+    async with lock:
+        # Drain buffer
+        messages = group_buffers.pop(group_id, [])
+
+        if not messages:
+            return
+
+        # The trigger message is the last one (for reply_to targeting)
+        trigger_msg = messages[-1]
+
+        try:
+            await run_agent_async(
+                agent, messages, must_reply=must_reply,
+                onebot_client=onebot, send_scene="group",
+                trigger_message_id=trigger_msg.message_id,
+                bot_message_ids=bot_message_ids,
+            )
+        except Exception:
+            logger.exception("Agent execution failed for group %s", group_id)
+            return
+
+
+async def periodic_check(agent, onebot: OneBotWSClient,
+                         group_buffers: dict[str, list[GroupMessage]],
+                         group_locks: dict[str, asyncio.Lock],
+                         bot_message_ids: deque) -> None:
+    """Periodically check all groups with buffered messages and call agent with must_reply=False."""
+    while True:
+        await asyncio.sleep(PERIODIC_CHECK_INTERVAL)
+
+        # Snapshot current group_ids that have buffered messages
+        group_ids = list(group_buffers.keys())
+        if not group_ids:
+            continue
+
+        print(f"[{now_str()}] [PERIODIC] Checking {len(group_ids)} group(s) with buffered messages")
+
+        for group_id in group_ids:
+            if group_id not in group_buffers or not group_buffers[group_id]:
+                continue
+            try:
+                await _handle_group_agent_call(
+                    agent, onebot, group_id,
+                    group_buffers, group_locks,
+                    bot_message_ids, must_reply=False,
+                )
+            except Exception:
+                logger.exception("Periodic check failed for group %s", group_id)
+
 
 async def handler(websocket) -> None:
     global BOT_QQ_ID
@@ -181,64 +392,85 @@ async def handler(websocket) -> None:
 
     print(f"[{now_str()}] WS connected: remote={remote}, path={path}")
 
-    # Lazy-load agent (already initialised in main)
     agent = AgentManager().get_instance_obj('qq_social_agent')
     if agent is None:
         print(f"[{now_str()}] ERROR: qq_social_agent not loaded. Check YAML config.")
         return
 
-    loop = asyncio.get_running_loop()
+    onebot = OneBotWSClient(websocket)
+
+    # Per-connection state
+    group_buffers: dict[str, list[GroupMessage]] = {}
+    group_locks: dict[str, asyncio.Lock] = {}
+    bot_message_ids: deque[str] = deque(maxlen=_MAX_BOT_MESSAGE_IDS)
+
+    # Start reader and periodic check coroutines
+    reader_task = asyncio.create_task(onebot.reader_loop())
+    periodic_task = asyncio.create_task(
+        periodic_check(agent, onebot, group_buffers,
+                       group_locks, bot_message_ids)
+    )
 
     try:
-        async for raw_message in websocket:
+        while True:
             try:
-                evt = json.loads(raw_message)
-            except json.JSONDecodeError:
-                continue
+                evt = await onebot.event_queue.get()
+            except asyncio.CancelledError:
+                break
+            if evt is None:
+                break
 
-            # Auto-detect bot's QQ ID from the first event
             if BOT_QQ_ID is None and "self_id" in evt:
                 BOT_QQ_ID = evt["self_id"]
                 print(f"[{now_str()}] Bot QQ ID detected: {BOT_QQ_ID}")
 
-            # Only process group messages
-            if not is_group_message(evt):
+            # ---- Private message: direct agent call, must_reply=True ----
+            if is_private_message(evt):
+                msg, _ = evt_to_private_message(evt, BOT_QQ_ID)
+                print(f"[{now_str()}] [PRIVATE] user={msg.sender_id}({msg.sender_name}) text={msg.content}")
+
+                try:
+                    await run_agent_async(
+                        agent, [msg], must_reply=True,
+                        onebot_client=onebot, send_scene="private",
+                        trigger_message_id=msg.message_id,
+                        bot_message_ids=bot_message_ids,
+                    )
+                except Exception:
+                    logger.exception("Agent execution failed (private)")
+                    continue
                 continue
 
-            msg, image_urls = evt_to_group_message(evt, BOT_QQ_ID)
+            # ---- Group message: buffer + hard rule check ----
+            if is_group_message(evt):
+                msg, _ = evt_to_group_message(evt, BOT_QQ_ID)
+                group_id = msg.group_id
+                print(f"[{now_str()}] [GROUP] group={group_id} user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 
-            print(f"[{now_str()}] [GROUP] "
-                  f"group={msg.group_id} "
-                  f"user={msg.sender_id}({msg.sender_name}) "
-                  f"text={msg.content}"
-                  f"{' images=' + str(len(image_urls)) if image_urls else ''}")
+                # Buffer the message
+                group_buffers.setdefault(group_id, []).append(msg)
 
-            # Run agent in thread pool to avoid blocking the WS event loop
-            try:
-                response = await loop.run_in_executor(
-                    _executor,
-                    run_agent_sync, agent, [msg], image_urls,
-                )
-            except Exception:
-                logger.exception("Agent execution failed")
+                # Check hard rules
+                if check_hard_rules(msg, BOT_ID, BOT_NAMES, set(bot_message_ids)):
+                    print(f"[{now_str()}] [HARD RULE] Triggered for group={group_id}")
+                    asyncio.create_task(
+                        _handle_group_agent_call(
+                            agent, onebot, group_id,
+                            group_buffers, group_locks,
+                            bot_message_ids, must_reply=True,
+                        )
+                    )
                 continue
-
-            if response:
-                print(f"[{now_str()}] [BOT REPLY] {response}")
-                # TODO: send response back to QQ group via OneBot API
-            else:
-                print(f"[{now_str()}] [BOT] (no reply)")
 
     except ConnectionClosed as e:
         print(f"[{now_str()}] WS disconnected: code={e.code}, reason={e.reason}")
     except Exception as e:
         print(f"[{now_str()}] Unexpected error: {e!r}")
         logger.exception("Handler error")
+    finally:
+        periodic_task.cancel()
+        reader_task.cancel()
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 async def main() -> None:
     print(f"[{now_str()}] Initialising AgentUniverse...")

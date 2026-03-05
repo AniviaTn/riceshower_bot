@@ -32,3 +32,4 @@ logs/
 
 # Secrets / API keys
 custom_key.toml
+/qq_social_bot_app/data/

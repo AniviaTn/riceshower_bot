@@ -12,7 +12,7 @@ import time
 from collections import Counter
 from typing import Dict, List, Optional
 
-import redis
+import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 
@@ -104,14 +104,14 @@ def _jaccard(set_a: set, set_b: set) -> float:
 
 
 class TopicStateManager:
-    """Auto-detect and track conversation topics per group using Redis.
+    """Auto-detect and track conversation topics per group using async Redis.
 
     Redis key scheme:
         ts:{group_id}:topics          -> sorted set (member=topic_id, score=heat)
         ts:{group_id}:{topic_id}      -> hash {keywords, participants, summary, state}
     """
 
-    def __init__(self, redis_client: redis.Redis):
+    def __init__(self, redis_client: aioredis.Redis):
         self._redis = redis_client
 
     # ----------------------------------------------------------
@@ -130,7 +130,7 @@ class TopicStateManager:
     # Public API
     # ----------------------------------------------------------
 
-    def detect_and_update(self, group_id: str, message: dict) -> Optional[str]:
+    async def detect_and_update(self, group_id: str, message: dict) -> Optional[str]:
         """Extract keywords from a message and update topic state.
 
         Args:
@@ -147,7 +147,7 @@ class TopicStateManager:
 
         keywords = extract_keywords(content)
         if not keywords:
-            self.cool_down(group_id, current_time=msg_time)
+            await self.cool_down(group_id, current_time=msg_time)
             return None
 
         kw_set = set(keywords)
@@ -157,12 +157,12 @@ class TopicStateManager:
         best_score = 0.0
 
         topics_key = self._topics_key(group_id)
-        existing_topics = self._redis.zrangebyscore(
+        existing_topics = await self._redis.zrangebyscore(
             topics_key, HEAT_THRESHOLD, '+inf')
 
         for tid in existing_topics:
             detail_key = self._topic_detail_key(group_id, tid)
-            stored_kw_raw = self._redis.hget(detail_key, 'keywords')
+            stored_kw_raw = await self._redis.hget(detail_key, 'keywords')
             if not stored_kw_raw:
                 continue
             try:
@@ -176,18 +176,18 @@ class TopicStateManager:
                 best_topic_id = tid
 
         if best_score >= JACCARD_THRESHOLD and best_topic_id:
-            self._boost_topic(group_id, best_topic_id, keywords, sender)
+            await self._boost_topic(group_id, best_topic_id, keywords, sender)
             topic_id = best_topic_id
         else:
             topic_id = _topic_id(keywords)
-            self._create_topic(group_id, topic_id, keywords, sender, content)
+            await self._create_topic(group_id, topic_id, keywords, sender, content)
 
-        self.cool_down(group_id, current_time=msg_time)
+        await self.cool_down(group_id, current_time=msg_time)
 
         return topic_id
 
-    def detect_and_update_batch(self, group_id: str,
-                                messages: List[dict]) -> Optional[str]:
+    async def detect_and_update_batch(self, group_id: str,
+                                      messages: List[dict]) -> Optional[str]:
         """Process multiple messages for topic detection, cool down once.
 
         More efficient than calling detect_and_update() per message because
@@ -218,12 +218,12 @@ class TopicStateManager:
             best_score = 0.0
 
             topics_key = self._topics_key(group_id)
-            existing_topics = self._redis.zrangebyscore(
+            existing_topics = await self._redis.zrangebyscore(
                 topics_key, HEAT_THRESHOLD, '+inf')
 
             for tid in existing_topics:
                 detail_key = self._topic_detail_key(group_id, tid)
-                stored_kw_raw = self._redis.hget(detail_key, 'keywords')
+                stored_kw_raw = await self._redis.hget(detail_key, 'keywords')
                 if not stored_kw_raw:
                     continue
                 try:
@@ -236,25 +236,25 @@ class TopicStateManager:
                     best_topic_id = tid
 
             if best_score >= JACCARD_THRESHOLD and best_topic_id:
-                self._boost_topic(group_id, best_topic_id, keywords, sender)
+                await self._boost_topic(group_id, best_topic_id, keywords, sender)
                 last_topic_id = best_topic_id
             else:
                 tid = _topic_id(keywords)
-                self._create_topic(group_id, tid, keywords, sender, content)
+                await self._create_topic(group_id, tid, keywords, sender, content)
                 last_topic_id = tid
 
         # Apply time-based decay once, using the latest message's timestamp
         latest_ts = max((m.get('timestamp', 0) for m in messages), default=0)
-        self.cool_down(group_id, current_time=latest_ts or time.time())
+        await self.cool_down(group_id, current_time=latest_ts or time.time())
 
         return last_topic_id
 
-    def get_current_topic(self, group_id: str) -> Optional[Dict]:
+    async def get_current_topic(self, group_id: str) -> Optional[Dict]:
         """Return the highest-heat topic as a dict, or None."""
         topics_key = self._topics_key(group_id)
 
         # Get top topic by score (heat)
-        top = self._redis.zrevrange(topics_key, 0, 0, withscores=True)
+        top = await self._redis.zrevrange(topics_key, 0, 0, withscores=True)
         if not top:
             return None
 
@@ -263,7 +263,7 @@ class TopicStateManager:
             return None
 
         detail_key = self._topic_detail_key(group_id, topic_id)
-        data = self._redis.hgetall(detail_key)
+        data = await self._redis.hgetall(detail_key)
         if not data:
             return None
 
@@ -288,7 +288,7 @@ class TopicStateManager:
             'heat': heat,
         }
 
-    def cool_down(self, group_id: str, current_time: float = None):
+    async def cool_down(self, group_id: str, current_time: float = None):
         """Decay all topic heats based on elapsed real time.
 
         Uses an exponential half-life model: heat is halved every
@@ -300,23 +300,23 @@ class TopicStateManager:
             current_time = time.time()
 
         last_key = f'ts:{group_id}:last_decay'
-        last_raw = self._redis.get(last_key)
+        last_raw = await self._redis.get(last_key)
         last_decay_at = float(last_raw) if last_raw else current_time
 
         elapsed = current_time - last_decay_at
         if elapsed < 1.0:
             # Sub-second gap → skip (covers rapid batch calls)
-            self._redis.set(last_key, str(current_time), ex=TOPIC_TTL)
+            await self._redis.set(last_key, str(current_time), ex=TOPIC_TTL)
             return
 
         decay_factor = math.pow(0.5, elapsed / DECAY_HALF_LIFE)
 
         topics_key = self._topics_key(group_id)
-        all_topics = self._redis.zrangebyscore(
+        all_topics = await self._redis.zrangebyscore(
             topics_key, '-inf', '+inf', withscores=True)
 
         if not all_topics:
-            self._redis.set(last_key, str(current_time), ex=TOPIC_TTL)
+            await self._redis.set(last_key, str(current_time), ex=TOPIC_TTL)
             return
 
         pipe = self._redis.pipeline()
@@ -334,14 +334,14 @@ class TopicStateManager:
             pipe.zremrangebyrank(topics_key, 0, alive_count - MAX_TOPICS - 1)
 
         pipe.set(last_key, str(current_time), ex=TOPIC_TTL)
-        pipe.execute()
+        await pipe.execute()
 
     # ----------------------------------------------------------
     # Internal helpers
     # ----------------------------------------------------------
 
-    def _create_topic(self, group_id: str, topic_id: str,
-                      keywords: List[str], sender: str, content: str):
+    async def _create_topic(self, group_id: str, topic_id: str,
+                            keywords: List[str], sender: str, content: str):
         """Create a new topic entry."""
         topics_key = self._topics_key(group_id)
         detail_key = self._topic_detail_key(group_id, topic_id)
@@ -357,20 +357,20 @@ class TopicStateManager:
             'state': 'active',
         })
         pipe.expire(detail_key, TOPIC_TTL)
-        pipe.execute()
+        await pipe.execute()
 
-    def _boost_topic(self, group_id: str, topic_id: str,
-                     new_keywords: List[str], sender: str):
+    async def _boost_topic(self, group_id: str, topic_id: str,
+                           new_keywords: List[str], sender: str):
         """Boost heat and update an existing topic."""
         topics_key = self._topics_key(group_id)
         detail_key = self._topic_detail_key(group_id, topic_id)
 
         # Boost heat (capped)
-        current_heat = self._redis.zscore(topics_key, topic_id) or 0
+        current_heat = await self._redis.zscore(topics_key, topic_id) or 0
         new_heat = min(current_heat + HEAT_BOOST, HEAT_CAP)
 
         # Merge keywords
-        stored_kw_raw = self._redis.hget(detail_key, 'keywords') or '[]'
+        stored_kw_raw = await self._redis.hget(detail_key, 'keywords') or '[]'
         try:
             stored_kw = json.loads(stored_kw_raw)
         except (json.JSONDecodeError, TypeError):
@@ -378,7 +378,7 @@ class TopicStateManager:
         merged_kw = list(set(stored_kw + new_keywords))
 
         # Merge participants
-        stored_parts_raw = self._redis.hget(detail_key, 'participants') or '[]'
+        stored_parts_raw = await self._redis.hget(detail_key, 'participants') or '[]'
         try:
             stored_parts = json.loads(stored_parts_raw)
         except (json.JSONDecodeError, TypeError):
@@ -394,4 +394,4 @@ class TopicStateManager:
             'participants': json.dumps(stored_parts, ensure_ascii=False),
         })
         pipe.expire(detail_key, TOPIC_TTL)
-        pipe.execute()
+        await pipe.execute()

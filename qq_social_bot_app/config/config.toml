@@ -10,6 +10,7 @@ agent = ['${ROOT_PACKAGE}.intelligence.agentic.agent']
 llm = ['${ROOT_PACKAGE}.intelligence.agentic.llm']
 llm_channel = ['${ROOT_PACKAGE}.intelligence.agentic.llm']
 tool = ['${ROOT_PACKAGE}.intelligence.agentic.tool']
+skill = ['${ROOT_PACKAGE}.intelligence.agentic.skill']
 memory = ['${ROOT_PACKAGE}.intelligence.agentic.memory']
 prompt = ['${ROOT_PACKAGE}.intelligence.agentic.prompt']
 

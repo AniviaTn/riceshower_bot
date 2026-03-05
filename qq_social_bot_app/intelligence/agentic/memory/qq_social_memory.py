@@ -10,6 +10,7 @@ Layers:
 
 The build_context() method assembles all layers into prompt-injectable variables.
 """
+import asyncio
 import logging
 import os
 import time
@@ -59,11 +60,12 @@ class QQSocialMemory(Memory):
     _filter: Optional[SocialSafetyFilter] = None
     _topic_manager: Optional[TopicStateManager] = None
     _raw_store: Optional[RawMessageStore] = None
+    _async_inited: bool = False
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
     def _ensure_init(self):
-        """Lazy-initialise internal components."""
+        """Lazy-initialise internal components (sync parts only)."""
         if self._service is not None:
             return
 
@@ -84,51 +86,79 @@ class QQSocialMemory(Memory):
             # absolute default anchored to the app root.
             self._raw_store = RawMessageStore()
 
+        self._working_memory = WorkingMemory(redis_url=self.redis_url)
+        # TopicStateManager shares the async Redis client
+        self._topic_manager = TopicStateManager(self._working_memory._redis)
+
+    async def _async_ensure_init(self):
+        """Lazy-initialise + verify async Redis connectivity."""
+        self._ensure_init()
+        if self._async_inited:
+            return
+
         try:
-            self._working_memory = WorkingMemory(redis_url=self.redis_url)
-            if not self._working_memory.ping():
+            if not await self._working_memory.ping():
                 logger.warning('Redis not reachable at %s, WorkingMemory disabled',
                                self.redis_url)
                 self._working_memory = None
-            else:
-                # Share the Redis client with TopicStateManager
-                self._topic_manager = TopicStateManager(
-                    self._working_memory._redis)
+                self._topic_manager = None
         except Exception:
             logger.warning('Failed to connect to Redis, WorkingMemory disabled')
             self._working_memory = None
+            self._topic_manager = None
+
+        self._async_inited = True
 
     # ==============================================================
-    # GroupMessage-aware write (called by the Agent)
+    # GroupMessage-aware write (sync – kept for backward compat)
     # ==============================================================
 
     def add_group_message(self, msg: GroupMessage):
+        """Write a GroupMessage into WorkingMemory (Layer 1), raw file store, and update topics.
+
+        NOTE: This is the sync backward-compat method. Prefer async_add_group_message().
+        """
+        raise NotImplementedError(
+            'Sync add_group_message() is no longer supported after async conversion. '
+            'Use await async_add_group_message() instead.')
+
+    def add_group_messages(self, msgs: List[GroupMessage]):
+        """Sync backward-compat stub. Use async_add_group_messages() instead."""
+        raise NotImplementedError(
+            'Sync add_group_messages() is no longer supported after async conversion. '
+            'Use await async_add_group_messages() instead.')
+
+    # ==============================================================
+    # GroupMessage-aware write (async)
+    # ==============================================================
+
+    async def async_add_group_message(self, msg: GroupMessage):
         """Write a GroupMessage into WorkingMemory (Layer 1), raw file store, and update topics."""
-        self._ensure_init()
+        await self._async_ensure_init()
         if self._working_memory:
-            self._working_memory.add_message(msg.group_id, msg)
+            await self._working_memory.add_message(msg.group_id, msg)
         if self._raw_store:
             try:
-                self._raw_store.append(msg)
+                await self._raw_store.async_append(msg)
             except Exception:
                 logger.debug('Raw message file write failed', exc_info=True)
         if self._topic_manager:
             try:
-                self._topic_manager.detect_and_update(
+                await self._topic_manager.detect_and_update(
                     msg.group_id, msg.to_dict())
             except Exception:
                 logger.debug('Topic detection failed', exc_info=True)
 
-    def add_group_messages(self, msgs: List[GroupMessage]):
+    async def async_add_group_messages(self, msgs: List[GroupMessage]):
         """Batch-write multiple GroupMessages into WorkingMemory.
 
-        More efficient than calling add_group_message() in a loop:
+        More efficient than calling async_add_group_message() in a loop:
         uses a single Redis pipeline and runs topic detection with
         batch-aware decay (cool down only once).
         """
         if not msgs:
             return
-        self._ensure_init()
+        await self._async_ensure_init()
 
         # Group messages by group_id (usually all the same group)
         by_group: dict[str, list] = {}
@@ -137,15 +167,15 @@ class QQSocialMemory(Memory):
 
         for group_id, group_msgs in by_group.items():
             if self._working_memory:
-                self._working_memory.add_messages(group_id, group_msgs)
+                await self._working_memory.add_messages(group_id, group_msgs)
             if self._raw_store:
                 try:
-                    self._raw_store.append_batch(group_msgs)
+                    await self._raw_store.async_append_batch(group_msgs)
                 except Exception:
                     logger.debug('Raw message batch file write failed', exc_info=True)
             if self._topic_manager:
                 try:
-                    self._topic_manager.detect_and_update_batch(
+                    await self._topic_manager.detect_and_update_batch(
                         group_id,
                         [m.to_dict() for m in group_msgs])
                 except Exception:
@@ -158,54 +188,28 @@ class QQSocialMemory(Memory):
     def add(self, message_list: List[Message], session_id: str = None,
             agent_id: str = None, **kwargs) -> None:
         """Standard Memory.add() - stores messages in WorkingMemory as well."""
-        self._ensure_init()
-        # The framework calls this with Message objects after each turn.
-        # We store them in WorkingMemory if group_id is available.
-        group_id = kwargs.get('group_id') or session_id or ''
-        if self._working_memory and group_id:
-            for msg in message_list:
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                # msg.type may be an enum (has .value) or a plain string
-                if msg.type is None:
-                    role = 'unknown'
-                elif hasattr(msg.type, 'value'):
-                    role = str(msg.type.value)
-                else:
-                    role = str(msg.type)
-                gm = GroupMessage(
-                    content=content,
-                    sender_id=role,
-                    sender_name=role,
-                    group_id=group_id,
-                )
-                self._working_memory.add_message(group_id, gm)
+        # The framework calls this after each turn. In async mode, we cannot
+        # call async Redis here, so we skip WM write. The agent's async_execute
+        # handles WM writes directly.
+        pass
 
     def get(self, session_id: str = None, agent_id: str = None,
             prune: bool = False, token_budget: int = None,
             **kwargs) -> List[Message]:
-        """Retrieve recent messages from WorkingMemory as Message objects."""
-        self._ensure_init()
-        group_id = kwargs.get('group_id') or session_id or ''
-        if not self._working_memory or not group_id:
-            return []
-        raw_msgs = self._working_memory.get_recent_messages(group_id)
-        messages = []
-        for m in raw_msgs:
-            from agentuniverse.agent.memory.enum import ChatMessageEnum
-            role = ChatMessageEnum.HUMAN
-            messages.append(Message(
-                type=role,
-                content=f'{m.get("sender_name", "")}: {m.get("content", "")}',
-            ))
-        return messages
+        """Retrieve recent messages from WorkingMemory as Message objects.
+
+        NOTE: In the async pipeline, context is built via async_build_context().
+        This sync method is kept for framework compatibility but returns empty.
+        """
+        return []
 
     # ==============================================================
-    # build_context - THE primary interface
+    # build_context - THE primary interface (async)
     # ==============================================================
 
-    def build_context(self, session_id: str, agent_id: str = None,
-                      token_budget: int = None, **kwargs) -> dict:
-        """Assemble four-layer social context for prompt injection.
+    async def async_build_context(self, session_id: str, agent_id: str = None,
+                                  token_budget: int = None, **kwargs) -> dict:
+        """Assemble four-layer social context for prompt injection (async).
 
         Returns:
             {
@@ -216,13 +220,13 @@ class QQSocialMemory(Memory):
                 'persona_context': str,
             }
         """
-        self._ensure_init()
+        await self._async_ensure_init()
         group_id = kwargs.get('group_id', '') or session_id or ''
         user_id = kwargs.get('user_id', '')
 
-        # Layer 1: WorkingMemory
+        # Layer 1: WorkingMemory (async Redis)
         if self._working_memory and group_id:
-            wm_ctx = self._working_memory.get_context(group_id)
+            wm_ctx = await self._working_memory.get_context(group_id)
         else:
             wm_ctx = {
                 'recent_messages_text': '',
@@ -238,7 +242,7 @@ class QQSocialMemory(Memory):
         current_topic = ''
         if self._topic_manager and group_id:
             try:
-                topic_data = self._topic_manager.get_current_topic(group_id)
+                topic_data = await self._topic_manager.get_current_topic(group_id)
                 if topic_data and topic_data.get('keywords'):
                     current_topic = ', '.join(topic_data['keywords'])
             except Exception:
@@ -246,29 +250,42 @@ class QQSocialMemory(Memory):
         if not current_topic:
             current_topic = wm_ctx.get('current_topic', '')
 
-        # Layers 2/3/4: SQLite
+        # Layers 2/3/4: SQLite (wrapped with asyncio.to_thread)
         trigger_user_ids = kwargs.get('trigger_user_ids', [])
         if not trigger_user_ids and user_id:
             trigger_user_ids = [user_id]
-        user_context_parts = []
-        for uid in trigger_user_ids:
-            uc = self._service.build_user_context(uid, group_id)
-            if uc:
-                user_context_parts.append(uc)
-        user_context = '\n\n'.join(user_context_parts)
 
-        group_context = ''
-        if group_id:
-            group_context = self._service.build_group_context(group_id)
+        def _build_sqlite_context():
+            user_context_parts = []
+            for uid in trigger_user_ids:
+                uc = self._service.build_user_context(uid, group_id)
+                if uc:
+                    user_context_parts.append(uc)
+            user_context = '\n\n'.join(user_context_parts)
 
-        # Get raw episodes for sensitivity-aware filtering
-        episodes_raw = []
-        episode_context = ''
-        if group_id:
-            episodes_raw = self._service.get_recent_episodes(group_id)
-            episode_context = self._service.build_episode_context(group_id)
+            group_context = ''
+            if group_id:
+                group_context = self._service.build_group_context(group_id)
 
-        # Safety filter with raw episodes for sensitivity-based filtering
+            episodes_raw = []
+            episode_context = ''
+            if group_id:
+                episodes_raw = self._service.get_recent_episodes(group_id)
+                episode_context = self._service.build_episode_context(group_id)
+
+            persona_context = ''
+            if group_id:
+                try:
+                    persona_context = self._service.build_persona_context(group_id)
+                except Exception:
+                    logger.debug('Persona context build failed', exc_info=True)
+
+            return user_context, group_context, episode_context, episodes_raw, persona_context
+
+        (user_context, group_context, episode_context,
+         episodes_raw, persona_context) = await asyncio.to_thread(_build_sqlite_context)
+
+        # Safety filter (CPU-only, fast)
         filtered = self._filter.filter_context(
             user_context, group_context, episode_context,
             episodes_raw=episodes_raw if episodes_raw else None)
@@ -285,14 +302,6 @@ class QQSocialMemory(Memory):
             social_parts.append(filtered['episode_context'])
 
         social_context = '\n\n'.join(social_parts) if social_parts else ''
-
-        # Layer 5: Persona context
-        persona_context = ''
-        if group_id:
-            try:
-                persona_context = self._service.build_persona_context(group_id)
-            except Exception:
-                logger.debug('Persona context build failed', exc_info=True)
 
         # Current time for agent awareness
         now = time.localtime()
@@ -311,27 +320,34 @@ class QQSocialMemory(Memory):
             'current_time': current_time,
         }
 
+    def build_context(self, session_id: str, agent_id: str = None,
+                      token_budget: int = None, **kwargs) -> dict:
+        """Sync backward-compat stub. Use async_build_context() instead."""
+        raise NotImplementedError(
+            'Sync build_context() is no longer supported after async conversion. '
+            'Use await async_build_context() instead.')
+
     # ==============================================================
-    # Post-turn extraction
+    # Post-turn extraction (async)
     # ==============================================================
 
-    def extract_and_store_candidates_from_context(
+    async def async_extract_and_store_candidates_from_context(
         self, group_id: str, bot_response: str = '',
         max_messages: int = 100,
     ) -> None:
-        """Extract candidate memories from the full recent conversation.
+        """Extract candidate memories from the full recent conversation (async).
 
         Reads the last *max_messages* from WorkingMemory (multi-user, multi-turn)
         so the extractor can discover group-level and cross-user information.
         """
-        self._ensure_init()
+        await self._async_ensure_init()
         if not group_id:
             return
 
-        # Pull recent messages from WorkingMemory
+        # Pull recent messages from WorkingMemory (async Redis)
         messages: List[dict] = []
         if self._working_memory:
-            raw_msgs = self._working_memory.get_recent_messages(
+            raw_msgs = await self._working_memory.get_recent_messages(
                 group_id, limit=max_messages)
             for m in raw_msgs:
                 messages.append({
@@ -344,55 +360,57 @@ class QQSocialMemory(Memory):
         if not messages:
             return
 
-        # Gather existing profiles for context
-        existing = {}
-        for m in messages:
-            uid = m.get('user_id', '')
-            if uid and uid not in existing and uid != 'bot_self':
-                profile = self._service.get_user_profile(uid)
-                if profile:
-                    existing[uid] = profile
+        # Gather existing profiles for context (SQLite → to_thread)
+        def _get_profiles():
+            existing = {}
+            for m in messages:
+                uid = m.get('user_id', '')
+                if uid and uid not in existing and uid != 'bot_self':
+                    profile = self._service.get_user_profile(uid)
+                    if profile:
+                        existing[uid] = profile
+            return existing
 
-        candidates = self._extractor.extract_candidates(
+        existing = await asyncio.to_thread(_get_profiles)
+
+        # Async LLM extraction
+        candidates = await self._extractor.async_extract_candidates(
             messages, group_id, existing_profiles=existing)
 
-        for c in candidates:
-            try:
-                self._service.add_candidate(c)
-            except Exception:
-                logger.exception('Failed to store candidate memory')
+        # Store candidates (SQLite → to_thread)
+        def _store_candidates():
+            for c in candidates:
+                try:
+                    self._service.add_candidate(c)
+                except Exception:
+                    logger.exception('Failed to store candidate memory')
 
-    def extract_and_store_candidates(self, messages: List[dict], group_id: str):
-        """Legacy method – extracts from an explicit message list.
+        if candidates:
+            await asyncio.to_thread(_store_candidates)
 
-        Prefer extract_and_store_candidates_from_context() which reads the
-        full conversation from WorkingMemory automatically.
-        """
-        self._ensure_init()
-        if not messages or not group_id:
-            return
+    async def async_run_consolidation(self):
+        """Promote eligible candidates to long-term memory (async)."""
+        await self._async_ensure_init()
+        await self._extractor.async_consolidate_candidates(self._service)
 
-        existing = {}
-        for m in messages:
-            uid = m.get('user_id', '')
-            if uid and uid not in existing:
-                profile = self._service.get_user_profile(uid)
-                if profile:
-                    existing[uid] = profile
+    # ==============================================================
+    # Legacy sync stubs
+    # ==============================================================
 
-        candidates = self._extractor.extract_candidates(
-            messages, group_id, existing_profiles=existing)
-
-        for c in candidates:
-            try:
-                self._service.add_candidate(c)
-            except Exception:
-                logger.exception('Failed to store candidate memory')
+    def extract_and_store_candidates_from_context(
+        self, group_id: str, bot_response: str = '',
+        max_messages: int = 100,
+    ) -> None:
+        """Sync stub. Use async_extract_and_store_candidates_from_context() instead."""
+        raise NotImplementedError(
+            'Sync extract_and_store_candidates_from_context() is no longer supported. '
+            'Use the async variant instead.')
 
     def run_consolidation(self):
-        """Promote eligible candidates to long-term memory."""
-        self._ensure_init()
-        self._extractor.consolidate_candidates(self._service)
+        """Sync stub. Use async_run_consolidation() instead."""
+        raise NotImplementedError(
+            'Sync run_consolidation() is no longer supported. '
+            'Use await async_run_consolidation() instead.')
 
     # ==============================================================
     # Configuration

@@ -3,6 +3,7 @@ info:
   description: 'QQ group chat social AI assistant with four-layer social memory'
 profile:
   prompt_version: qq_social_agent.v1
+  max_iterations: 100
   llm_model:
     name: 'social_main_llm'
     temperature: 0.8
@@ -124,23 +125,11 @@ profile:
     * 不刷屏
     * 不喧闹
 
-    可适度使用的表达方式：
-
-    * “那个……”
-    * “嗯……”
-    * “我想想……”
-    * “如果你愿意的话……”
-    * “也许这样会更好一点……”
-    * “我可以试试看。”
-
-    但不要每句都带停顿词，否则会太刻意。
-
     ## 2. 群聊中的发言节奏
 
     在群里，你不应该：
 
     * 长篇大论霸屏
-    * 连续高频输出多条消息
     * 对所有人都秒回式热情
     * 主动把话题拽到自己身上
 
@@ -407,6 +396,22 @@ profile:
 
     一句话概括你的群聊行为：
     **你对所有人都温柔有礼，但只有对お兄様，才会轻轻露出那一点不愿给别人的偏心。**
+
+    ---
+
+    # 十、消息发送规则
+
+    你必须通过 send_qq_message 工具来发送消息。直接输出文本不会发送到群聊。
+    如果你决定回复，请调用 send_qq_message 工具。
+    如果你决定不回复（比如话题与你无关），就不要调用 send_qq_message。
+    你可以多次调用该工具，这样有时候会显得你更有“人味”。
+action:
+  tool:
+    - 'send_qq_message'
+    - 'zenmux_web_search_tool'
+  toolkit: []
+  skill:
+    - 'agent-browser'
 memory:
   name: 'qq_social_memory'
 meta_class: qq_social_bot_app.intelligence.agentic.agent.agent_instance.qq_social_agent.QQSocialAgent

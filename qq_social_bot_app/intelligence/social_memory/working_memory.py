@@ -8,7 +8,7 @@ import logging
 import time
 from typing import List, Optional
 
-import redis
+import redis.asyncio as aioredis
 
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
 
@@ -43,7 +43,7 @@ def format_message_time(timestamp: float, now: float = None) -> str:
 
 
 class WorkingMemory:
-    """Immediate conversation memory backed by Redis.
+    """Immediate conversation memory backed by async Redis.
 
     Key scheme:
         wm:{group_id}:messages     -> List (JSON-encoded per entry)
@@ -54,7 +54,7 @@ class WorkingMemory:
 
     def __init__(self, redis_url: str = 'redis://localhost:6379/0',
                  max_messages: int = 200, ttl_seconds: int = 7200):
-        self._redis: redis.Redis = redis.Redis.from_url(
+        self._redis: aioredis.Redis = aioredis.from_url(
             redis_url, decode_responses=True)
         self._max_messages = max_messages
         self._ttl = ttl_seconds
@@ -67,17 +67,17 @@ class WorkingMemory:
     def _key(group_id: str, suffix: str) -> str:
         return f'wm:{group_id}:{suffix}'
 
-    def _refresh_ttl(self, group_id: str):
+    async def _refresh_ttl(self, group_id: str):
         """Reset TTL on all keys for this group."""
         for suffix in ('messages', 'topic', 'mood', 'participants'):
             key = self._key(group_id, suffix)
-            self._redis.expire(key, self._ttl)
+            await self._redis.expire(key, self._ttl)
 
     # ----------------------------------------------------------
     # Write
     # ----------------------------------------------------------
 
-    def add_message(self, group_id: str, msg: GroupMessage):
+    async def add_message(self, group_id: str, msg: GroupMessage):
         """Append a message, trim to max_messages, reset TTL."""
         entry = {
             'sender_id': msg.sender_id,
@@ -96,9 +96,9 @@ class WorkingMemory:
         part_key = self._key(group_id, 'participants')
         pipe.sadd(part_key, msg.sender_name)
         pipe.expire(part_key, self._ttl)
-        pipe.execute()
+        await pipe.execute()
 
-    def add_messages(self, group_id: str, msgs: List[GroupMessage]):
+    async def add_messages(self, group_id: str, msgs: List[GroupMessage]):
         """Append multiple messages in a single Redis pipeline."""
         if not msgs:
             return
@@ -119,26 +119,26 @@ class WorkingMemory:
         pipe.ltrim(msg_key, -self._max_messages, -1)
         pipe.expire(msg_key, self._ttl)
         pipe.expire(part_key, self._ttl)
-        pipe.execute()
+        await pipe.execute()
 
-    def update_topic(self, group_id: str, topic: str, mood: str = None):
+    async def update_topic(self, group_id: str, topic: str, mood: str = None):
         """Update current topic and optionally mood."""
         pipe = self._redis.pipeline()
         pipe.set(self._key(group_id, 'topic'), topic, ex=self._ttl)
         if mood:
             pipe.set(self._key(group_id, 'mood'), mood, ex=self._ttl)
-        pipe.execute()
+        await pipe.execute()
 
     # ----------------------------------------------------------
     # Read
     # ----------------------------------------------------------
 
-    def get_recent_messages(self, group_id: str,
-                           limit: Optional[int] = None) -> List[dict]:
+    async def get_recent_messages(self, group_id: str,
+                                  limit: Optional[int] = None) -> List[dict]:
         """Return recent messages as list of dicts, oldest first."""
         msg_key = self._key(group_id, 'messages')
         n = limit or self._max_messages
-        raw = self._redis.lrange(msg_key, -n, -1)
+        raw = await self._redis.lrange(msg_key, -n, -1)
         messages = []
         for item in raw:
             try:
@@ -147,7 +147,7 @@ class WorkingMemory:
                 continue
         return messages
 
-    def get_context(self, group_id: str) -> dict:
+    async def get_context(self, group_id: str) -> dict:
         """Build the full working-memory context for a group.
 
         Returns:
@@ -159,11 +159,11 @@ class WorkingMemory:
                 'mood': str,
             }
         """
-        messages = self.get_recent_messages(group_id)
-        topic = self._redis.get(self._key(group_id, 'topic')) or ''
-        mood = self._redis.get(self._key(group_id, 'mood')) or ''
+        messages = await self.get_recent_messages(group_id)
+        topic = await self._redis.get(self._key(group_id, 'topic')) or ''
+        mood = await self._redis.get(self._key(group_id, 'mood')) or ''
         participants = list(
-            self._redis.smembers(self._key(group_id, 'participants')) or [])
+            await self._redis.smembers(self._key(group_id, 'participants')) or [])
 
         # Build formatted text with smart time display
         now = time.time()
@@ -184,18 +184,40 @@ class WorkingMemory:
         }
 
     # ----------------------------------------------------------
+    # Query helpers
+    # ----------------------------------------------------------
+
+    async def get_message_count(self, group_id: str) -> int:
+        """Return the number of messages currently stored for *group_id*."""
+        return await self._redis.llen(self._key(group_id, 'messages'))
+
+    async def trim_oldest_messages(self, group_id: str, count: int) -> None:
+        """Remove the *count* oldest (leftmost) messages for *group_id*.
+
+        After trimming, TTL is refreshed so the remaining messages keep
+        their normal expiry window.
+        """
+        if count <= 0:
+            return
+        msg_key = self._key(group_id, 'messages')
+        # LTRIM keeps elements from index `count` to the end, effectively
+        # removing the first `count` entries.
+        await self._redis.ltrim(msg_key, count, -1)
+        await self._redis.expire(msg_key, self._ttl)
+
+    # ----------------------------------------------------------
     # Cleanup
     # ----------------------------------------------------------
 
-    def clear_group(self, group_id: str):
+    async def clear_group(self, group_id: str):
         """Explicitly clear all working-memory data for a group."""
         keys = [self._key(group_id, s)
                 for s in ('messages', 'topic', 'mood', 'participants')]
-        self._redis.delete(*keys)
+        await self._redis.delete(*keys)
 
-    def ping(self) -> bool:
+    async def ping(self) -> bool:
         """Check Redis connectivity."""
         try:
-            return self._redis.ping()
-        except redis.ConnectionError:
+            return await self._redis.ping()
+        except Exception:
             return False

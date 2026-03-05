@@ -1,8 +1,8 @@
 name: 'social_main_llm'
 description: 'claude-sonnet-4 via zenmux for QQ social agent'
-model_name: 'anthropic/claude-opus-4.5'
+model_name: 'anthropic/claude-opus-4.6'
 temperature: 0.8
-max_tokens: 2048
+max_tokens: 64000
 max_context_length: 1000000
 streaming: True
 api_key: '${ZENMUX_API_KEY}'
