@@ -106,7 +106,7 @@ def parse_segments(segments: Any, bot_self_id: int | None) -> tuple[str, list[st
     return "".join(text_parts).strip(), at_list, image_urls, reply_to
 
 
-def evt_to_group_message(evt: dict, bot_self_id: int | None) -> tuple[GroupMessage, list[str]]:
+def evt_to_group_message(evt: dict, bot_self_id: int | None) -> GroupMessage:
     segments = evt.get("message", [])
     text, at_list, image_urls, reply_to = parse_segments(segments, bot_self_id)
 
@@ -125,11 +125,12 @@ def evt_to_group_message(evt: dict, bot_self_id: int | None) -> tuple[GroupMessa
         message_id=str(evt.get("message_id", "")),
         reply_to=reply_to,
         at_list=at_list,
+        image_urls=image_urls,
     )
-    return msg, image_urls
+    return msg
 
 
-def evt_to_private_message(evt: dict, bot_self_id: int | None) -> tuple[GroupMessage, list[str]]:
+def evt_to_private_message(evt: dict, bot_self_id: int | None) -> GroupMessage:
     segments = evt.get("message", [])
     text, at_list, image_urls, reply_to = parse_segments(segments, bot_self_id)
 
@@ -152,8 +153,9 @@ def evt_to_private_message(evt: dict, bot_self_id: int | None) -> tuple[GroupMes
         message_id=str(evt.get("message_id", "")),
         reply_to=reply_to,
         at_list=at_list,
+        image_urls=image_urls,
     )
-    return msg, image_urls
+    return msg
 
 
 def build_onebot_message(
@@ -434,7 +436,7 @@ async def handler(websocket) -> None:
 
             # ---- Private message: direct agent call, must_reply=True ----
             if is_private_message(evt):
-                msg, _ = evt_to_private_message(evt, BOT_QQ_ID)
+                msg = evt_to_private_message(evt, BOT_QQ_ID)
                 print(f"[{now_str()}] [PRIVATE] user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 
                 # Update ID mappings
@@ -458,7 +460,7 @@ async def handler(websocket) -> None:
 
             # ---- Group message: buffer + hard rule check ----
             if is_group_message(evt):
-                msg, _ = evt_to_group_message(evt, BOT_QQ_ID)
+                msg = evt_to_group_message(evt, BOT_QQ_ID)
                 group_id = msg.group_id
                 print(f"[{now_str()}] [GROUP] group={group_id} user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 

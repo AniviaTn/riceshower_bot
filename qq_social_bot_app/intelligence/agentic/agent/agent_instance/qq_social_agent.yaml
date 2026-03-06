@@ -12,7 +12,6 @@ action:
   tool:
     - 'send_qq_message'
     - 'zenmux_web_search_tool'
-    - 'memory_write'
     - 'memory_search'
     - 'memory_read'
   toolkit: []

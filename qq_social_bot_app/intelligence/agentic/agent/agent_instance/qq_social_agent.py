@@ -20,6 +20,7 @@ from agentuniverse.llm.llm_manager import LLMManager
 from agentuniverse.ai_context.agent_context import AgentContext
 
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
+from qq_social_bot_app.intelligence.social_memory.image_cache import download_images
 from qq_social_bot_app.intelligence.social_memory.working_memory import (
     format_message_time,
 )
@@ -162,6 +163,22 @@ class QQSocialAgent(AgentTemplate):
         agent_input.update(context)
 
         # core_persona now comes from async_build_context (loaded from Markdown files)
+
+        # ---- Phase 3.6: Download images and inject into agent_input ----
+        all_image_urls = []
+        for m in messages:
+            if hasattr(m, 'image_urls') and m.image_urls:
+                all_image_urls.extend(m.image_urls)
+        if all_image_urls:
+            try:
+                local_paths = await download_images(all_image_urls)
+                if local_paths:
+                    agent_input['image_urls'] = local_paths
+                    logger.info('Injected %d image(s) into agent_input for group %s',
+                                len(local_paths), group_id)
+            except Exception:
+                logger.warning('Image download failed for group %s', group_id,
+                               exc_info=True)
 
         # ---- Phase 3.5: Probability check (only when must_reply=False) ----
         if not must_reply:

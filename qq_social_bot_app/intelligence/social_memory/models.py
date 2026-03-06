@@ -19,6 +19,7 @@ class GroupMessage:
     message_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     reply_to: str = ''
     at_list: list = field(default_factory=list)
+    image_urls: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -30,4 +31,5 @@ class GroupMessage:
             'message_id': self.message_id,
             'reply_to': self.reply_to,
             'at_list': self.at_list,
+            'image_urls': self.image_urls,
         }

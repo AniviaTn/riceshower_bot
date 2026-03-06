@@ -86,6 +86,7 @@ class WorkingMemory:
             'timestamp': msg.timestamp,
             'message_id': msg.message_id,
             'reply_to': msg.reply_to,
+            'image_urls': msg.image_urls if hasattr(msg, 'image_urls') else [],
         }
         msg_key = self._key(group_id, 'messages')
         pipe = self._redis.pipeline()
@@ -113,6 +114,7 @@ class WorkingMemory:
                 'timestamp': msg.timestamp,
                 'message_id': msg.message_id,
                 'reply_to': msg.reply_to,
+                'image_urls': msg.image_urls if hasattr(msg, 'image_urls') else [],
             }
             pipe.rpush(msg_key, json.dumps(entry, ensure_ascii=False))
             pipe.sadd(part_key, msg.sender_name)
