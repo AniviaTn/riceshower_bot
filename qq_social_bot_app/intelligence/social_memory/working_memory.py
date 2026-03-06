@@ -147,8 +147,14 @@ class WorkingMemory:
                 continue
         return messages
 
-    async def get_context(self, group_id: str) -> dict:
+    async def get_context(self, group_id: str, id_mapping=None) -> dict:
         """Build the full working-memory context for a group.
+
+        Args:
+            group_id: The group to get context for.
+            id_mapping: Optional IDMappingService instance. When provided,
+                sender names are resolved to their current display name,
+                falling back to the stored sender_name.
 
         Returns:
             {
@@ -170,7 +176,13 @@ class WorkingMemory:
         lines = []
         for m in messages:
             ts_str = format_message_time(m.get('timestamp', 0), now)
-            name = m.get('sender_name', '???')
+            # Use current display name from id_mapping if available
+            sender_id = m.get('sender_id', '')
+            stored_name = m.get('sender_name', '???')
+            if id_mapping and sender_id:
+                name = id_mapping.get_user_name(sender_id) or stored_name
+            else:
+                name = stored_name
             content = m.get('content', '')
             lines.append(f'[{ts_str}] {name}: {content}')
         text = '\n'.join(lines)

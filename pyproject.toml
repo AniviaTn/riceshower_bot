@@ -12,6 +12,11 @@ packages = [
 [tool.poetry.dependencies]
 python = "^3.10"
 agentUniverse = "~0.0.15"
+chromadb = ">=0.4.0"
+dashscope = ">=1.0.0"
+openai = ">=1.0.0"
+APScheduler = ">=3.10.0,<4.0.0"
+SQLAlchemy = ">=2.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.2.0"

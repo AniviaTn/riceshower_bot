@@ -1,0 +1,27 @@
+name: 'memory_write'
+description: |
+  写入记忆文件。将 Markdown 内容写入指定路径的文件。
+  路径格式为相对路径，基于 ~/.qq_bot_data/ 目录。
+
+  可写入的目录：
+  - people/{user_id}/{文件名}.md — 记录关于某个人的信息
+  - groups/{group_id}/{文件名}.md — 记录关于某个群的信息
+  - notes/{文件名}.md — 记录通用笔记
+  - people/{user_id}/profile.md — 更新某人的基础画像
+  - groups/{group_id}/profile.md — 更新群的基础描述
+
+  不可写入：persona/ 目录（只读）
+
+  文件名建议格式：{日期}_{简短描述}.md，例如 2026-03-04_聊了养猫的事.md
+  profile.md 用于存放基础画像信息，会自动加载到对话上下文中。
+  其他文件会被自动索引，可通过 memory_search 搜索到。
+
+  去重机制：写入时会自动检查同一实体下是否已有语义相似度 ≥ 90% 的文件。
+  如果发现高度相似的已有记忆，会返回警告并展示已有文件路径和内容预览。
+  如需强制写入（例如确认是新事件），在 content 开头加上 FORCE: 前缀即可。
+tool_type: 'api'
+input_keys: ['path', 'content']
+metadata:
+  type: 'TOOL'
+  module: 'qq_social_bot_app.intelligence.agentic.tool.memory_write_tool'
+  class: 'MemoryWriteTool'

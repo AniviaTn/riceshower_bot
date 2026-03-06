@@ -1,0 +1,15 @@
+name: 'memory_read'
+description: |
+  读取记忆文件。读取指定路径的 Markdown 文件内容。
+  当 memory_search 返回了某个文件路径但内容被截断时，可以用此工具读取完整内容。
+
+  路径格式为相对路径，例如：
+  - people/12345/profile.md
+  - groups/67890/2026-03-04_讨论了旅行.md
+  - notes/2026-03-04_某人推荐的火锅店.md
+tool_type: 'api'
+input_keys: ['path']
+metadata:
+  type: 'TOOL'
+  module: 'qq_social_bot_app.intelligence.agentic.tool.memory_read_tool'
+  class: 'MemoryReadTool'

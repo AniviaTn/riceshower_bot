@@ -13,11 +13,7 @@ from typing import Optional
 
 from agentuniverse.agent.action.tool.tool import Tool
 
-# Anchor to qq_social_bot_app/ root.
-# search_chat_history_tool.py is at: qq_social_bot_app/intelligence/agentic/tool/
-_APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
-_DEFAULT_BASE_DIR = os.path.join(_APP_ROOT, 'data', 'raw_messages')
+_DEFAULT_BASE_DIR = os.path.join(os.path.expanduser('~'), '.qq_bot_data', 'raw_messages')
 
 
 class SearchChatHistoryTool(Tool):

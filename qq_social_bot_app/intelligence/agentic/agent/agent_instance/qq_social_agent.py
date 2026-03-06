@@ -2,21 +2,11 @@
 
 External API is only agent.run() / agent.async_run():
 
-  # Single message (real-time push)
   output = await agent.async_run(messages=[msg], bot_id='bot_self', bot_names=['小U'], must_reply=True)
-
-  # Batch messages (periodic / buffered)
   output = await agent.async_run(messages=[msg1, msg2, ...], bot_id='bot_self', bot_names=['小U'], must_reply=False)
 
   response = output.get_data('output', '')
-  # response is '' when the bot decides not to reply
-
-Internally, async_execute() handles the full pipeline:
-  1. Ingest all messages into WorkingMemory
-  2. If must_reply: build context → run LLM → post-process
-  3. If not must_reply: build context → probability LLM call → if pass, run LLM → post-process
 """
-import asyncio
 import json
 import logging
 import random
@@ -36,13 +26,10 @@ from qq_social_bot_app.intelligence.social_memory.working_memory import (
 
 logger = logging.getLogger(__name__)
 
-# Identifier used when the bot writes its own replies into WorkingMemory
 BOT_SENDER_ID = 'bot_self'
 
-# Probability thresholds for passive reply decision
-PROB_FLOOR = 0.2   # below this → always skip
-PROB_CEIL = 0.7    # above this → always reply
-# between floor and ceil → random roll
+PROB_FLOOR = 0.2
+PROB_CEIL = 0.7
 
 PROBABILITY_JUDGE_PROMPT = """\
 现在你需要判断是否要主动加入当前对话。
@@ -67,10 +54,7 @@ PROBABILITY_JUDGE_PROMPT = """\
 
 
 class QQSocialAgent(AgentTemplate):
-    """QQ group chat social AI assistant.
-
-    Only entry point: agent.async_run(messages=[...], bot_id=..., bot_names=[...], must_reply=True/False)
-    """
+    """QQ group chat social AI assistant."""
 
     def input_keys(self) -> list[str]:
         return []
@@ -82,7 +66,6 @@ class QQSocialAgent(AgentTemplate):
         return {**agent_result, 'output': agent_result.get('output', '')}
 
     def parse_input(self, input_object: InputObject, agent_input: dict) -> dict:
-        """Extract messages and config from InputObject."""
         messages = input_object.get_data('messages')
         group_message = input_object.get_data('group_message')
 
@@ -93,7 +76,6 @@ class QQSocialAgent(AgentTemplate):
             agent_input['session_id'] = sorted_msgs[0].group_id
             agent_input['input'] = sorted_msgs[-1].content
         elif group_message:
-            # Backward compat: single GroupMessage → wrap in list
             agent_input['messages'] = [group_message]
             agent_input['group_id'] = group_message.group_id
             agent_input['session_id'] = group_message.group_id
@@ -118,7 +100,7 @@ class QQSocialAgent(AgentTemplate):
         return agent_input
 
     # ==============================================================
-    # execute – sync (kept for backward compat, delegates to framework)
+    # execute – sync stub
     # ==============================================================
 
     def execute(self, input_object: InputObject, agent_input: dict,
@@ -137,8 +119,6 @@ class QQSocialAgent(AgentTemplate):
 
         group_id = agent_input.get('group_id', '')
         messages = agent_input.get('messages', [])
-        bot_id = agent_input.get('bot_id', BOT_SENDER_ID)
-        bot_names = agent_input.get('bot_names', ['bot', 'Bot'])
         must_reply = agent_input.get('must_reply', True)
 
         # Ensure async init
@@ -149,10 +129,9 @@ class QQSocialAgent(AgentTemplate):
         if messages:
             await self._async_ingest_messages(memory, messages)
 
-        # ---- Phase 2: Determine trigger messages and path ----
+        # ---- Phase 2: Determine trigger messages ----
         if messages:
             if must_reply:
-                # Hard rule triggered: last message is the trigger, rest are context
                 primary = messages[-1]
                 agent_input['user_id'] = primary.sender_id
                 agent_input['user_name'] = primary.sender_name
@@ -161,7 +140,6 @@ class QQSocialAgent(AgentTemplate):
                 agent_input['trigger_messages'] = (
                     self._format_trigger_messages(messages))
             else:
-                # Periodic check: use last few messages as trigger anchor
                 recent = messages[-3:] if len(messages) > 3 else messages
                 primary = recent[-1]
                 agent_input['user_id'] = primary.sender_id
@@ -171,7 +149,6 @@ class QQSocialAgent(AgentTemplate):
                 agent_input['trigger_messages'] = (
                     self._format_trigger_messages(recent))
         else:
-            # Direct-input mode (no GroupMessage list)
             agent_input.setdefault('trigger_messages',
                                    agent_input.get('input', ''))
 
@@ -184,9 +161,7 @@ class QQSocialAgent(AgentTemplate):
         )
         agent_input.update(context)
 
-        profile = self.agent_model.profile or {}
-        if 'core_persona' in profile and 'core_persona' not in agent_input:
-            agent_input['core_persona'] = profile['core_persona']
+        # core_persona now comes from async_build_context (loaded from Markdown files)
 
         # ---- Phase 3.5: Probability check (only when must_reply=False) ----
         if not must_reply:
@@ -221,32 +196,8 @@ class QQSocialAgent(AgentTemplate):
             agent_context=agent_context, **kwargs)
 
         # ---- Phase 5: Post-processing ----
-        bot_response = result.get('output', '')
-
-        # Write bot reply into WorkingMemory
-        if bot_response and hasattr(memory, 'async_add_group_message'):
-            bot_msg = GroupMessage(
-                content=bot_response,
-                sender_id=BOT_SENDER_ID,
-                sender_name='Bot',
-                group_id=group_id,
-            )
-            await memory.async_add_group_message(bot_msg)
-
-        # Extract candidate memories from full conversation
-        if hasattr(memory, 'async_extract_and_store_candidates_from_context'):
-            try:
-                await memory.async_extract_and_store_candidates_from_context(
-                    group_id=group_id, bot_response=bot_response)
-            except Exception:
-                logger.debug('Candidate extraction failed', exc_info=True)
-
-        # Consolidation (promote eligible candidates)
-        if hasattr(memory, 'async_run_consolidation'):
-            try:
-                await memory.async_run_consolidation()
-            except Exception:
-                logger.debug('Memory consolidation failed', exc_info=True)
+        # Bot message recording is handled by SendQQMessageTool on each send,
+        # so we don't need to record here (tool sends may be multiple messages).
 
         return result
 
@@ -256,7 +207,6 @@ class QQSocialAgent(AgentTemplate):
 
     def _create_agent_context(self, input_object: InputObject,
                               agent_input: dict, memory: Memory) -> AgentContext:
-        """Inject OneBot runtime dependencies into AgentContext.extra."""
         ctx = super()._create_agent_context(input_object, agent_input, memory)
         ctx.extra['onebot_client'] = input_object.get_data('onebot_client')
         ctx.extra['send_scene'] = input_object.get_data('send_scene') or 'group'
@@ -264,6 +214,9 @@ class QQSocialAgent(AgentTemplate):
         ctx.extra['send_target_user_id'] = agent_input.get('user_id')
         ctx.extra['trigger_message_id'] = input_object.get_data('trigger_message_id')
         ctx.extra['bot_message_ids'] = input_object.get_data('bot_message_ids')
+        ctx.extra['memory'] = memory
+        ctx.extra['bot_qq_id'] = agent_input.get('bot_id', BOT_SENDER_ID)
+        ctx.extra['bot_name'] = (agent_input.get('bot_names') or ['bot'])[0]
         return ctx
 
     # ==============================================================
@@ -272,51 +225,21 @@ class QQSocialAgent(AgentTemplate):
 
     async def _async_ingest_messages(self, memory: Memory,
                                      messages: list[GroupMessage]) -> None:
-        """Write messages into WorkingMemory and update interaction counters."""
         if not messages:
             return
-
-        # Batch write (single Redis pipeline) + topic detection
         if hasattr(memory, 'async_add_group_messages'):
             await memory.async_add_group_messages(messages)
         elif hasattr(memory, 'async_add_group_message'):
             for msg in messages:
                 await memory.async_add_group_message(msg)
 
-        # Update interaction counters (SQLite → to_thread)
-        if hasattr(memory, '_service'):
-            try:
-                memory._ensure_init()
-                def _update_counters():
-                    for msg in messages:
-                        if msg.sender_id and msg.group_id:
-                            memory._service.increment_interaction(
-                                msg.sender_id, msg.group_id)
-                await asyncio.to_thread(_update_counters)
-            except Exception:
-                logger.debug('Failed to update interaction counters',
-                             exc_info=True)
-
-    # ----------------------------------------------------------
-    # Probability judgment (replaces old passive check + decision agent)
-    # ----------------------------------------------------------
-
     async def _async_judge_reply_probability(self, agent_input: dict,
                                              memory: Memory,
                                              **kwargs) -> float:
-        """Use the main LLM with full persona to judge reply probability.
+        core_persona = agent_input.get('core_persona', '')
 
-        Returns a float between 0.0 and 1.0.
-        """
-        profile = self.agent_model.profile or {}
-        core_persona = agent_input.get('core_persona', '') or profile.get('core_persona', '')
-
-        # Build system prompt: full persona + probability judgment instructions
         system_prompt = core_persona.rstrip() + '\n\n' + PROBABILITY_JUDGE_PROMPT
 
-        # Build user content from the context already assembled in Phase 3
-        # chat_history already contains ALL messages (including Bot's own replies)
-        # so the LLM can locate "since my last reply" on its own.
         chat_history = agent_input.get('chat_history', '')
         social_context = agent_input.get('social_context', '')
         current_topic = agent_input.get('current_topic', '')
@@ -339,7 +262,7 @@ class QQSocialAgent(AgentTemplate):
             {'role': 'user', 'content': user_content},
         ]
 
-        # Use the main LLM (same as social_main_llm)
+        profile = self.agent_model.profile or {}
         llm_name = profile.get('llm_model', {}).get('name', '')
         llm = LLMManager().get_instance_obj(llm_name) if llm_name else self.process_llm(**kwargs)
 
@@ -349,22 +272,19 @@ class QQSocialAgent(AgentTemplate):
             probability = self._parse_probability(raw_text)
         except Exception:
             logger.exception('Probability judgment LLM call failed')
-            probability = 0.0  # Default to not replying on error
+            probability = 0.0
 
         return probability
 
     @staticmethod
     def _parse_probability(raw_text: str) -> float:
-        """Parse the LLM JSON response into a probability float."""
         text = raw_text.strip()
 
-        # Strip markdown code block if present
         if text.startswith('```'):
             lines = text.split('\n')
             lines = [l for l in lines if not l.strip().startswith('```')]
             text = '\n'.join(lines).strip()
 
-        # Extract JSON object
         start = text.find('{')
         end = text.rfind('}')
         if start != -1 and end != -1 and end > start:
@@ -388,13 +308,8 @@ class QQSocialAgent(AgentTemplate):
 
         return max(0.0, min(1.0, prob))
 
-    # ----------------------------------------------------------
-    # Trigger message formatting
-    # ----------------------------------------------------------
-
     @staticmethod
     def _format_trigger_messages(triggers: list[GroupMessage]) -> str:
-        """Format trigger messages for prompt injection."""
         now = time.time()
         lines = []
         for msg in triggers:

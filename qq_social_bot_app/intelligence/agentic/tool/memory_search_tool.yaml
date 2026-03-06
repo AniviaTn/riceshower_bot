@@ -1,0 +1,21 @@
+name: 'memory_search'
+description: |
+  搜索记忆。通过语义搜索在记忆文件中查找相关信息。
+  当你需要回忆某件事、查找某人的信息、或搜索之前记录过的内容时使用此工具。
+
+  参数：
+  - query: 搜索关键词或描述（必填）
+  - scope: 搜索范围，可选 people/groups/notes/all（默认 all）
+  - user_id: 限定某个用户的记忆（可选）
+  - group_id: 限定某个群的记忆（可选）
+
+  示例：
+  - 搜索某人养猫的事：query="养猫", user_id="12345"
+  - 搜索群里讨论过的旅行计划：query="旅行计划", group_id="67890"
+  - 搜索所有关于火锅的记忆：query="火锅"
+tool_type: 'api'
+input_keys: ['query']
+metadata:
+  type: 'TOOL'
+  module: 'qq_social_bot_app.intelligence.agentic.tool.memory_search_tool'
+  class: 'MemorySearchTool'

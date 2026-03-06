@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import os
+
+os.environ.setdefault('ANONYMIZED_TELEMETRY', 'False')
 import sys
 import uuid
 from collections import deque
@@ -20,6 +22,12 @@ sys.path.insert(0, PROJECT_ROOT)
 from agentuniverse.base.agentuniverse import AgentUniverse
 from agentuniverse.agent.agent_manager import AgentManager
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
+from qq_social_bot_app.intelligence.social_memory.memory_services import (
+    init_services, get_id_mapping_service, get_scheduler_service,
+)
+from qq_social_bot_app.intelligence.scheduler.jobs import (
+    summarize_all_groups, startup_check,
+)
 
 CONFIG_PATH = os.path.join(PROJECT_ROOT, 'qq_social_bot_app', 'config', 'config.toml')
 
@@ -429,6 +437,13 @@ async def handler(websocket) -> None:
                 msg, _ = evt_to_private_message(evt, BOT_QQ_ID)
                 print(f"[{now_str()}] [PRIVATE] user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 
+                # Update ID mappings
+                try:
+                    id_svc = get_id_mapping_service()
+                    id_svc.set_user_name(msg.sender_id, msg.sender_name)
+                except Exception:
+                    pass  # Not critical
+
                 try:
                     await run_agent_async(
                         agent, [msg], must_reply=True,
@@ -446,6 +461,13 @@ async def handler(websocket) -> None:
                 msg, _ = evt_to_group_message(evt, BOT_QQ_ID)
                 group_id = msg.group_id
                 print(f"[{now_str()}] [GROUP] group={group_id} user={msg.sender_id}({msg.sender_name}) text={msg.content}")
+
+                # Update ID mappings
+                try:
+                    id_svc = get_id_mapping_service()
+                    id_svc.set_user_name(msg.sender_id, msg.sender_name)
+                except Exception:
+                    pass  # Not critical
 
                 # Buffer the message
                 group_buffers.setdefault(group_id, []).append(msg)
@@ -476,6 +498,25 @@ async def main() -> None:
     print(f"[{now_str()}] Initialising AgentUniverse...")
     AgentUniverse().start(config_path=CONFIG_PATH)
     print(f"[{now_str()}] Agent framework ready.")
+
+    print(f"[{now_str()}] Initialising memory services...")
+    init_services()
+    print(f"[{now_str()}] Memory services ready.")
+
+    # Start scheduler and register periodic jobs
+    print(f"[{now_str()}] Starting scheduler...")
+    scheduler = get_scheduler_service()
+    scheduler.start()
+
+    scheduler.add_cron_job(
+        job_id='summarize_all_groups',
+        func=summarize_all_groups,
+        cron_expr='0 */4 * * *',
+    )
+    print(f"[{now_str()}] Scheduler ready. Jobs: {scheduler.list_jobs()}")
+
+    # Non-blocking startup check for stale groups
+    asyncio.create_task(startup_check())
 
     print(f"[{now_str()}] Starting WS server at ws://{HOST}:{PORT}{EXPECTED_PATH}")
     async with serve(handler, HOST, PORT):

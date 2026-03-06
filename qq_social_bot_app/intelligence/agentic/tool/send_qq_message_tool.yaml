@@ -1,0 +1,11 @@
+name: 'send_qq_message'
+description: |
+  发送 QQ 消息到当前会话（群聊或私聊）。
+  这是你与用户交流的唯一方式——你必须调用此工具来发送回复。
+  如果你决定不回复，就不要调用此工具。
+tool_type: 'api'
+input_keys: ['text']
+metadata:
+  type: 'TOOL'
+  module: 'qq_social_bot_app.intelligence.agentic.tool.send_qq_message_tool'
+  class: 'SendQQMessageTool'
