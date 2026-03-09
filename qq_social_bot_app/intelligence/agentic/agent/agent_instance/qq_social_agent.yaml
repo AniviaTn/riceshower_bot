@@ -14,6 +14,8 @@ action:
     - 'zenmux_web_search_tool'
     - 'memory_search'
     - 'memory_read'
+    - 'memory_write'
+    - 'search_chat_history_tool'
   toolkit: []
   skill:
     - 'agent-browser'

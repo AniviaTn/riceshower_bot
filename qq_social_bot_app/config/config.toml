@@ -28,3 +28,16 @@ activate = 'false'
 activate = 'false'
 max_workers = 10
 server_port = 50051
+
+[BOT_CONFIG]
+data_root = '~/.qq_bot_data'
+image_cache_dir = '~/.qq_bot_data/image_cache'
+redis_url = 'redis://localhost:6379/0'
+bot_id = 'bot_self'
+bot_names = ['米浴', '米宝', '神の人形']
+ws_host = '127.0.0.1'
+ws_port = 8082
+ws_path = '/ws/onebot'
+periodic_check_interval = 120
+prob_floor = 0.2
+prob_ceil = 0.7

@@ -181,14 +181,22 @@ class SummarizationService:
                          len(messages), group_id, _MIN_MESSAGES)
             return []
 
-        # 3. Format chat history with current display names
+        # 3. Format chat history with current display names (include date)
         lines = []
+        current_date_str = ''
         for msg in messages:
             sender_id = msg.get('sender_id', '')
             name = id_mapping.get_user_name(sender_id) or msg.get('sender_name', '???')
             content = msg.get('content', '')
             ts = msg.get('timestamp', 0)
-            ts_str = time.strftime('%H:%M', time.localtime(ts)) if ts else '??:??'
+            if ts:
+                msg_date = time.strftime('%Y-%m-%d', time.localtime(ts))
+                ts_str = time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))
+                if msg_date != current_date_str:
+                    lines.append(f'\n--- {msg_date} ---')
+                    current_date_str = msg_date
+            else:
+                ts_str = '??:??'
             lines.append(f'[{ts_str}] {name}(ID:{sender_id}): {content}')
         chat_text = '\n'.join(lines)
 
@@ -197,8 +205,17 @@ class SummarizationService:
         group_name = id_mapping.get_group_name(group_id) or group_id
 
         # 5. Build initial messages
+        now = time.localtime()
+        current_date = time.strftime('%Y-%m-%d', now)
+        first_msg_date = time.strftime(
+            '%Y-%m-%d', time.localtime(messages[0].get('timestamp', since_ts)))
+        last_msg_date = time.strftime(
+            '%Y-%m-%d', time.localtime(messages[-1].get('timestamp', until_ts)))
+
         system_prompt = f'{persona}\n\n{_REVIEW_INSTRUCTION}'
         user_msg = (
+            f'当前日期：{current_date}\n'
+            f'以下聊天记录的时间范围：{first_msg_date} ~ {last_msg_date}\n\n'
             f'群「{group_name}」(ID: {group_id}) 最近的聊天记录：\n\n{chat_text}'
         )
 

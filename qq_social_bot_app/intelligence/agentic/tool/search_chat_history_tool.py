@@ -13,7 +13,9 @@ from typing import Optional
 
 from agentuniverse.agent.action.tool.tool import Tool
 
-_DEFAULT_BASE_DIR = os.path.join(os.path.expanduser('~'), '.qq_bot_data', 'raw_messages')
+from qq_social_bot_app.intelligence.utils import bot_config
+
+_DEFAULT_BASE_DIR = os.path.join(bot_config.get_data_root(), 'raw_messages')
 
 
 class SearchChatHistoryTool(Tool):

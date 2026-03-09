@@ -18,40 +18,17 @@ from agentuniverse.agent.template.agent_template import AgentTemplate
 from agentuniverse.llm.llm import LLM
 from agentuniverse.llm.llm_manager import LLMManager
 from agentuniverse.ai_context.agent_context import AgentContext
+from agentuniverse.prompt.prompt_manager import PromptManager
 
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
-from qq_social_bot_app.intelligence.social_memory.image_cache import download_images
 from qq_social_bot_app.intelligence.social_memory.working_memory import (
     format_message_time,
 )
+from qq_social_bot_app.intelligence.utils import bot_config
 
 logger = logging.getLogger(__name__)
 
 BOT_SENDER_ID = 'bot_self'
-
-PROB_FLOOR = 0.2
-PROB_CEIL = 0.7
-
-PROBABILITY_JUDGE_PROMPT = """\
-现在你需要判断是否要主动加入当前对话。
-
-下面的聊天记录中，标记为 "Bot" 的发言是你之前的回复。
-请重点审视**你上一次发言之后**到现在的所有消息，判断其中是否有你想要回应的内容。
-如果你从未发言过，则审视全部消息。
-
-判断标准：
-1. **话题相关性**：对话涉及你擅长的领域、或大家在讨论你相关的话题 → 概率偏高
-2. **有人需要帮助**：有人在提问或寻求建议，你可能能帮上忙 → 概率偏高
-3. **氛围邀请**：群聊氛围活跃且友好，适合你自然插话 → 概率略高
-4. **お兄様参与**：如果お兄様（肥猪/小花猪）在你上次回复之后有发言，你会更想回复 → 概率明显偏高
-5. **消息太少**：你上次回复之后只有 1-2 条简短消息，通常不值得主动加入 → 概率偏低
-6. **深夜时段**：当前如果是深夜（00:00-07:00），除非有明确需要，否则降低参与意愿 → 概率偏低
-7. **无关闲聊**：纯粹的成员间私人闲聊、水群刷屏、表情包大战 → 概率偏低
-8. **已有充分讨论**：话题已经被讨论完毕，没有新的切入点 → 概率偏低
-
-输出一个 0 到 1 之间的概率值，表示你想要回复的意愿。
-直接输出 JSON，不要输出任何其他文字、解释或 markdown 标记：
-{"probability": 0.7, "reason": "简短原因"}"""
 
 
 class QQSocialAgent(AgentTemplate):
@@ -164,31 +141,25 @@ class QQSocialAgent(AgentTemplate):
 
         # core_persona now comes from async_build_context (loaded from Markdown files)
 
-        # ---- Phase 3.6: Download images and inject into agent_input ----
-        all_image_urls = []
-        for m in messages:
-            if hasattr(m, 'image_urls') and m.image_urls:
-                all_image_urls.extend(m.image_urls)
-        if all_image_urls:
-            try:
-                local_paths = await download_images(all_image_urls)
-                if local_paths:
-                    agent_input['image_urls'] = local_paths
-                    logger.info('Injected %d image(s) into agent_input for group %s',
-                                len(local_paths), group_id)
-            except Exception:
-                logger.warning('Image download failed for group %s', group_id,
-                               exc_info=True)
+        # ---- Phase 3.6: Inject pre-downloaded image paths ----
+        pre_downloaded = input_object.get_data('image_urls')
+        if pre_downloaded:
+            agent_input['image_urls'] = pre_downloaded
+            logger.info('Injected %d pre-downloaded image(s) for group %s',
+                        len(pre_downloaded), group_id)
 
         # ---- Phase 3.5: Probability check (only when must_reply=False) ----
         if not must_reply:
             probability = await self._async_judge_reply_probability(
                 agent_input, memory, **kwargs)
 
-            if probability <= PROB_FLOOR:
+            prob_floor = bot_config.get_prob_floor()
+            prob_ceil = bot_config.get_prob_ceil()
+
+            if probability <= prob_floor:
                 should_reply = False
                 decision_reason = 'below floor'
-            elif probability >= PROB_CEIL:
+            elif probability >= prob_ceil:
                 should_reply = True
                 decision_reason = 'above ceil'
             else:
@@ -254,25 +225,27 @@ class QQSocialAgent(AgentTemplate):
                                              memory: Memory,
                                              **kwargs) -> float:
         core_persona = agent_input.get('core_persona', '')
-
-        system_prompt = core_persona.rstrip() + '\n\n' + PROBABILITY_JUDGE_PROMPT
-
         chat_history = agent_input.get('chat_history', '')
         social_context = agent_input.get('social_context', '')
         current_topic = agent_input.get('current_topic', '')
         current_time = agent_input.get('current_time', '')
 
-        user_parts = []
-        if current_time:
-            user_parts.append(f'当前时间：{current_time}')
-        if current_topic:
-            user_parts.append(f'当前话题：{current_topic}')
-        if social_context:
-            user_parts.append(f'社交记忆：\n{social_context}')
-        if chat_history:
-            user_parts.append(f'聊天记录：\n{chat_history}')
-
-        user_content = '\n\n'.join(user_parts)
+        # Load prompt from YAML via PromptManager
+        prompt_obj = PromptManager().get_instance_obj('qq_social_agent.probability_judge')
+        if prompt_obj:
+            introduction = getattr(prompt_obj, 'introduction', '') or ''
+            instruction = getattr(prompt_obj, 'instruction', '') or ''
+            system_prompt = introduction.format(core_persona=core_persona).rstrip()
+            user_content = instruction.format(
+                current_time=current_time or '',
+                current_topic=current_topic or '',
+                social_context=social_context or '',
+                chat_history=chat_history or '',
+            )
+        else:
+            logger.warning('probability_judge prompt not found, using fallback')
+            system_prompt = core_persona
+            user_content = f'当前时间：{current_time}\n当前话题：{current_topic}\n聊天记录：\n{chat_history}'
 
         llm_messages = [
             {'role': 'system', 'content': system_prompt},

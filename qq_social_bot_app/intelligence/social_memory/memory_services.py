@@ -6,9 +6,9 @@ accessors for each service. Thread-safe initialisation via a simple flag.
 import logging
 import os
 
-logger = logging.getLogger(__name__)
+from qq_social_bot_app.intelligence.utils import bot_config
 
-DATA_ROOT = os.path.expanduser('~/.qq_bot_data')
+logger = logging.getLogger(__name__)
 
 _id_mapping: 'IDMappingService | None' = None
 _markdown_memory: 'MarkdownMemoryService | None' = None
@@ -24,7 +24,7 @@ def init_services(data_root: str | None = None) -> None:
     if _inited:
         return
 
-    root = data_root or DATA_ROOT
+    root = data_root or bot_config.get_data_root()
 
     # Ensure directory structure
     for subdir in ('persona', 'people', 'groups', 'notes', 'db', 'raw_messages'):
@@ -86,4 +86,4 @@ def get_scheduler_service() -> 'SchedulerService':
 
 
 def get_data_root() -> str:
-    return DATA_ROOT
+    return bot_config.get_data_root()

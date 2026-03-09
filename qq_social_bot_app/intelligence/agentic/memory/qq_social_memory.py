@@ -33,6 +33,7 @@ from qq_social_bot_app.intelligence.social_memory.memory_services import (
     init_services, get_id_mapping_service, get_markdown_service,
     get_embedding_service,
 )
+from qq_social_bot_app.intelligence.utils import bot_config
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,12 @@ class QQSocialMemory(Memory):
         """Lazy-initialise internal components (sync parts only)."""
         if self._raw_store is not None:
             return
+
+        # Fall back to centralised config if YAML didn't override
+        if not self.data_root or self.data_root == os.path.expanduser('~/.qq_bot_data'):
+            self.data_root = bot_config.get_data_root()
+        if not self.redis_url or self.redis_url == 'redis://localhost:6379/0':
+            self.redis_url = bot_config.get_redis_url()
 
         # Initialise singleton memory services
         init_services(data_root=self.data_root)
