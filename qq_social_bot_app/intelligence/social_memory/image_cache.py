@@ -76,6 +76,33 @@ def _url_to_filename(url: str, content_type: str = '') -> str:
     return f'{h}.jpeg'
 
 
+async def _download_urls(client: httpx.AsyncClient, urls: List[str],
+                         cache_dir: Path) -> dict[str, str]:
+    """Internal: download *urls* and return {url: local_path} mapping."""
+    result: dict[str, str] = {}
+    for url in urls:
+        preliminary = _url_to_filename(url)
+        preliminary_path = cache_dir / preliminary
+        if preliminary_path.exists():
+            logger.debug('Image cache hit: %s', preliminary_path)
+            result[url] = str(preliminary_path)
+            continue
+
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get('content-type', '')
+            filename = _url_to_filename(url, content_type)
+            local_path = cache_dir / filename
+            local_path.write_bytes(resp.content)
+            logger.info('Downloaded image: %s -> %s', url[:80], local_path)
+            result[url] = str(local_path)
+        except Exception:
+            logger.debug('Failed to download image (likely expired): %s',
+                         url[:120])
+    return result
+
+
 async def download_images(urls: List[str]) -> List[str]:
     """Download a list of image URLs and return their local file paths.
 
@@ -84,33 +111,52 @@ async def download_images(urls: List[str]) -> List[str]:
     """
     if not urls:
         return []
-
     cache_dir = _ensure_cache_dir()
-    local_paths: List[str] = []
+    async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT,
+                                 follow_redirects=True) as client:
+        mapping = await _download_urls(client, urls, cache_dir)
+    # Preserve original order, skip missing
+    return [mapping[u] for u in urls if u in mapping]
 
-    async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
-        for url in urls:
-            # Try cache with URL-only filename first (no Content-Type yet)
-            preliminary = _url_to_filename(url)
-            preliminary_path = cache_dir / preliminary
-            if preliminary_path.exists():
-                logger.debug('Image cache hit: %s', preliminary_path)
-                local_paths.append(str(preliminary_path))
-                continue
 
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                content_type = resp.headers.get('content-type', '')
-                filename = _url_to_filename(url, content_type)
-                local_path = cache_dir / filename
-                local_path.write_bytes(resp.content)
-                logger.info('Downloaded image: %s -> %s', url[:80], local_path)
-                local_paths.append(str(local_path))
-            except Exception:
-                logger.warning('Failed to download image: %s', url[:120], exc_info=True)
+async def download_images_as_map(urls: List[str]) -> dict[str, str]:
+    """Download images and return ``{original_url: local_file_path}`` mapping.
 
-    return local_paths
+    Already-cached images are returned immediately.  Failed downloads are
+    silently omitted from the result (logged as warnings).
+    """
+    if not urls:
+        return {}
+    cache_dir = _ensure_cache_dir()
+    async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT,
+                                 follow_redirects=True) as client:
+        return await _download_urls(client, urls, cache_dir)
+
+
+_CACHE_EXTENSIONS = ('.jpeg', '.png', '.gif', '.webp')
+
+
+def lookup_cached_images(urls: List[str]) -> dict[str, str]:
+    """Return ``{url: local_path}`` for URLs already present in the local cache.
+
+    This performs **no network requests** — it only checks the filesystem.
+    Use this for historical messages whose CDN URLs may have expired.
+    """
+    if not urls:
+        return {}
+    cache_dir = _get_cache_dir()
+    if not cache_dir.exists():
+        return {}
+
+    result: dict[str, str] = {}
+    for url in urls:
+        h = hashlib.sha256(url.encode()).hexdigest()[:16]
+        for ext in _CACHE_EXTENSIONS:
+            path = cache_dir / f'{h}{ext}'
+            if path.exists():
+                result[url] = str(path)
+                break
+    return result
 
 
 def cleanup_cache(max_age: float = _DEFAULT_MAX_AGE) -> int:

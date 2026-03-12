@@ -1,0 +1,18 @@
+name: 'edit_persona_memory'
+description: |
+  编辑你自己的长期记忆文件。
+
+  用法：
+  - 不传 content（或传空字符串）: 读取当前长期记忆内容，方便你查看已有内容后再决定如何修改。
+  - 传入 content: 用新内容完整覆盖长期记忆文件。请基于已有内容进行修改/追加，不要丢弃旧内容。
+
+  注意：
+  - 每次写入前请先读取已有内容，避免覆盖重要信息。
+  - 内容应使用 Markdown 格式，保持结构清晰。
+  - 只记录真正重要的、会持续影响你行为的认知，不要记录琐碎的单次事件。
+tool_type: 'api'
+input_keys: ['content']
+metadata:
+  type: 'TOOL'
+  module: 'qq_social_bot_app.intelligence.agentic.tool.edit_persona_memory_tool'
+  class: 'EditPersonaMemoryTool'

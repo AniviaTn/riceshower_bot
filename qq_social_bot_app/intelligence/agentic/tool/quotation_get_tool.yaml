@@ -1,0 +1,12 @@
+name: 'quotation_get_tool'
+server_name: 'quotation_get_tool-search'
+description: |
+  当日走势查询
+transport: 'sse'
+url: 'https://stargate.yingmi.com/mcp/sse?apiKey=-HVxBB0bLxDETpVIKEFaOw'
+origin_tool_name: 'GetLatestQuotations'
+
+metadata:
+  type: 'TOOL'
+  module: 'agentuniverse.agent.action.tool.mcp_tool'
+  class: 'MCPTool'

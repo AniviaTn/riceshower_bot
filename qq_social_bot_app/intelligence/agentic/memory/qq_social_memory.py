@@ -99,6 +99,14 @@ class QQSocialMemory(Memory):
         self._async_inited = True
 
     # ==============================================================
+    # Cache management
+    # ==============================================================
+
+    def invalidate_persona_cache(self) -> None:
+        """Clear the persona cache so the next build_context reloads from disk."""
+        self._persona_cache = None
+
+    # ==============================================================
     # GroupMessage-aware write (sync stubs)
     # ==============================================================
 
@@ -214,6 +222,7 @@ class QQSocialMemory(Memory):
             }
 
         chat_history = wm_ctx.get('recent_messages_text', '')
+        recent_messages = wm_ctx.get('recent_messages', [])
         current_mood = wm_ctx.get('mood', '')
 
         # Current topic: prefer TopicStateManager
@@ -239,6 +248,7 @@ class QQSocialMemory(Memory):
         return {
             'core_persona': core_persona,
             'chat_history': chat_history,
+            'recent_messages': recent_messages,
             'social_context': social_context,
             'current_topic': current_topic,
             'current_mood': current_mood,

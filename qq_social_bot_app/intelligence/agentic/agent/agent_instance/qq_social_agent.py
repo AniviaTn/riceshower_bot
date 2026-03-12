@@ -7,16 +7,21 @@ External API is only agent.run() / agent.async_run():
 
   response = output.get_data('output', '')
 """
+import base64
 import json
 import logging
+import os
 import random
 import time
 
 from agentuniverse.agent.input_object import InputObject
+from agentuniverse.agent.memory.enum import ChatMessageEnum
 from agentuniverse.agent.memory.memory import Memory
+from agentuniverse.agent.memory.message import Message
 from agentuniverse.agent.template.agent_template import AgentTemplate
 from agentuniverse.llm.llm import LLM
 from agentuniverse.llm.llm_manager import LLMManager
+from agentuniverse.llm.llm_output import LLMOutput
 from agentuniverse.ai_context.agent_context import AgentContext
 from agentuniverse.prompt.prompt_manager import PromptManager
 
@@ -29,6 +34,69 @@ from qq_social_bot_app.intelligence.utils import bot_config
 logger = logging.getLogger(__name__)
 
 BOT_SENDER_ID = 'bot_self'
+
+# Max images embedded as vision content (limits token cost).
+_MAX_IMAGES = 10
+# Only attempt image download for the most recent N messages.
+_IMAGE_DOWNLOAD_SCOPE = 30
+
+
+# ------------------------------------------------------------------
+# Image helpers
+# ------------------------------------------------------------------
+
+def _file_to_data_url(path: str) -> str | None:
+    """Convert a local image file to a ``data:`` base64 URL."""
+    ext = os.path.splitext(path)[1].lower()
+    mime_map = {'.png': 'image/png', '.jpeg': 'image/jpeg',
+                '.jpg': 'image/jpeg', '.gif': 'image/gif',
+                '.webp': 'image/webp'}
+    mime = mime_map.get(ext)
+    if not mime:
+        return None
+    try:
+        with open(path, 'rb') as f:
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+        return f'data:{mime};base64,{b64}'
+    except OSError:
+        return None
+
+
+def _build_multimodal_content(header: str, text: str,
+                              image_urls: list[str],
+                              url_to_path: dict[str, str],
+                              embeddable_urls: set[str]) -> list[dict]:
+    """Split *text* at ``[图片]`` placeholders and interleave images.
+
+    Only URLs present in *embeddable_urls* are actually embedded; others
+    remain as a ``[图片]`` text placeholder.
+    """
+    parts = text.split('[图片]')
+    blocks: list[dict] = []
+    url_idx = 0
+
+    for i, part in enumerate(parts):
+        segment = part
+        if i == 0:
+            segment = header + segment
+        if segment:
+            blocks.append({'type': 'text', 'text': segment})
+
+        # Insert image after each split except the last part
+        if i < len(parts) - 1:
+            url = image_urls[url_idx] if url_idx < len(image_urls) else None
+            url_idx += 1
+            if url and url in embeddable_urls:
+                local = url_to_path.get(url)
+                data_url = _file_to_data_url(local) if local else None
+                if data_url:
+                    blocks.append({'type': 'image_url',
+                                   'image_url': {'url': data_url}})
+                    continue
+            # Fallback: keep text placeholder
+            blocks.append({'type': 'text', 'text': '[图片]'})
+
+    return blocks or [{'type': 'text', 'text': header}]
 
 
 class QQSocialAgent(AgentTemplate):
@@ -98,6 +166,7 @@ class QQSocialAgent(AgentTemplate):
         group_id = agent_input.get('group_id', '')
         messages = agent_input.get('messages', [])
         must_reply = agent_input.get('must_reply', True)
+        bot_id = agent_input.get('bot_id', BOT_SENDER_ID)
 
         # Ensure async init
         if hasattr(memory, '_async_ensure_init'):
@@ -139,19 +208,34 @@ class QQSocialAgent(AgentTemplate):
         )
         agent_input.update(context)
 
-        # core_persona now comes from async_build_context (loaded from Markdown files)
+        # ---- Phase 3.4: Build individual chat history messages ----
+        recent_messages = agent_input.pop('recent_messages', [])
+        from qq_social_bot_app.intelligence.social_memory.memory_services import (
+            get_id_mapping_service,
+        )
+        id_mapping = get_id_mapping_service()
 
-        # ---- Phase 3.6: Inject pre-downloaded image paths ----
-        pre_downloaded = input_object.get_data('image_urls')
-        if pre_downloaded:
-            agent_input['image_urls'] = pre_downloaded
-            logger.info('Injected %d pre-downloaded image(s) for group %s',
-                        len(pre_downloaded), group_id)
+        # Look up cached images (Phase E downloaded them when messages arrived)
+        url_to_path = self._lookup_history_images(recent_messages)
+
+        chat_messages = self._build_chat_messages(
+            recent_messages, bot_id, id_mapping=id_mapping,
+            url_to_path=url_to_path, max_images=_MAX_IMAGES,
+        )
+
+        num_new = len(messages)
+        num_old = max(0, len(recent_messages) - num_new)
+
+        logger.info(
+            'Built %d individual chat messages for group %s '
+            '(%d old, %d new, %d images downloaded)',
+            len(chat_messages), group_id, num_old, num_new,
+            len(url_to_path))
 
         # ---- Phase 3.5: Probability check (only when must_reply=False) ----
         if not must_reply:
             probability = await self._async_judge_reply_probability(
-                agent_input, memory, **kwargs)
+                agent_input, chat_messages, memory, **kwargs)
 
             prob_floor = bot_config.get_prob_floor()
             prob_ceil = bot_config.get_prob_ceil()
@@ -176,9 +260,17 @@ class QQSocialAgent(AgentTemplate):
                 return {'output': ''}
 
         # ---- Phase 4: Run LLM (async) ----
+        # Remove keys that should NOT leak into prompt template rendering
+        agent_input.pop('chat_history', None)
+
         llm: LLM = self.process_llm(**kwargs)
         agent_context = self._create_agent_context(
             input_object, agent_input, memory)
+
+        # Inject individual messages as framework chat_history
+        agent_context.chat_history = chat_messages
+        agent_context.extra['chat_history_cache_boundary'] = num_old
+
         result = await self.customized_async_execute(
             input_object, agent_input, memory, llm,
             agent_context=agent_context, **kwargs)
@@ -208,6 +300,188 @@ class QQSocialAgent(AgentTemplate):
         return ctx
 
     # ==============================================================
+    # LLM invocation — inject cache_control for prompt caching
+    # ==============================================================
+
+    async def async_invoke_llm(self, llm: LLM, messages: list,
+                               input_object: InputObject,
+                               tools_schema: list[dict] = None,
+                               agent_context: AgentContext = None,
+                               **kwargs) -> LLMOutput:
+        """Override to inject cache_control breakpoints for Claude prompt caching.
+
+        4 breakpoints:
+          ① tools_schema[-1]           — tool definitions (stable)
+          ② system message             — core_persona + 行为准则 (stable per session)
+          ③ chat history boundary      — last "old" message (stable between calls)
+          ④ last tool-role message     — accumulates across tool-calling rounds
+        """
+        from agentuniverse.llm.transfer_utils import au_messages_to_openai
+
+        # ① Cache tool definitions: mark the last tool schema
+        if tools_schema:
+            tools_schema = [*tools_schema]  # shallow copy
+            tools_schema[-1] = {
+                **tools_schema[-1],
+                'cache_control': {'type': 'ephemeral'},
+            }
+
+        openai_messages = au_messages_to_openai(messages)
+
+        # Find the last tool-role message index for breakpoint ④
+        last_tool_idx = None
+        for i in range(len(openai_messages) - 1, -1, -1):
+            if openai_messages[i].get('role') == 'tool':
+                last_tool_idx = i
+                break
+
+        # ③ boundary: system(0) + old chat messages(1..boundary)
+        cache_boundary = (
+            agent_context.extra.get('chat_history_cache_boundary', 0)
+            if agent_context else 0
+        )
+
+        for i, msg in enumerate(openai_messages):
+            role = msg.get('role')
+            content = msg.get('content', '')
+
+            # ② Cache system message (core_persona + 行为准则 + target)
+            if role == 'system' and isinstance(content, str) and content:
+                msg['content'] = [
+                    {'type': 'text', 'text': content,
+                     'cache_control': {'type': 'ephemeral'}},
+                ]
+
+            # ③ Cache last "old" chat history message
+            elif i == cache_boundary and cache_boundary > 0:
+                self._inject_cache_control(msg)
+
+            # ④ Cache last tool result (grows each round in tool-calling loop)
+            elif role == 'tool' and i == last_tool_idx:
+                if isinstance(content, str):
+                    msg['content'] = [
+                        {'type': 'text', 'text': content,
+                         'cache_control': {'type': 'ephemeral'}},
+                    ]
+
+        return await super().async_invoke_llm(
+            llm, openai_messages, input_object,
+            tools_schema=tools_schema, agent_context=agent_context, **kwargs)
+
+    @staticmethod
+    def _inject_cache_control(msg: dict) -> None:
+        """Add ``cache_control`` to an OpenAI message dict (text or multimodal)."""
+        content = msg.get('content', '')
+        if isinstance(content, str) and content:
+            msg['content'] = [
+                {'type': 'text', 'text': content,
+                 'cache_control': {'type': 'ephemeral'}},
+            ]
+        elif isinstance(content, list) and content:
+            last = content[-1]
+            content[-1] = {**last, 'cache_control': {'type': 'ephemeral'}}
+
+    # ==============================================================
+    # Chat history message builder
+    # ==============================================================
+
+    @staticmethod
+    def _build_chat_messages(
+        recent_messages: list[dict],
+        bot_id: str,
+        id_mapping=None,
+        url_to_path: dict[str, str] | None = None,
+        max_images: int = _MAX_IMAGES,
+    ) -> list[Message]:
+        """Convert WorkingMemory dicts into individual ``Message`` objects.
+
+        - Bot messages → ``ChatMessageEnum.AI`` (assistant role)
+        - Others → ``ChatMessageEnum.HUMAN`` (user role) with ``[time] name:``
+        - Images are embedded inline for the most recent *max_images* images.
+        """
+        if not recent_messages:
+            return []
+
+        url_to_path = url_to_path or {}
+        now = time.time()
+
+        # Determine which image URLs will be embedded (most recent N)
+        embeddable_candidates: list[str] = []
+        for m in recent_messages:
+            for url in (m.get('image_urls') or []):
+                if url in url_to_path:
+                    embeddable_candidates.append(url)
+        embeddable_urls = set(embeddable_candidates[-max_images:])
+
+        result: list[Message] = []
+        for m in recent_messages:
+            sender_id = m.get('sender_id', '')
+            stored_name = m.get('sender_name', '???')
+            ts = format_message_time(m.get('timestamp', 0), now)
+            content_text = m.get('content', '')
+            msg_image_urls = m.get('image_urls') or []
+            is_bot = (sender_id == bot_id)
+
+            if is_bot:
+                # Assistant message — plain text, strip stale placeholders
+                clean = content_text.replace('[图片]', '').strip()
+                result.append(Message(
+                    type=ChatMessageEnum.AI,
+                    content=clean or content_text,
+                ))
+            else:
+                # Resolve display name
+                if id_mapping and sender_id:
+                    name = id_mapping.get_user_name(sender_id) or stored_name
+                else:
+                    name = stored_name
+                header = f'[{ts}] {name}: '
+
+                has_embeddable = any(
+                    u in embeddable_urls for u in msg_image_urls)
+
+                if msg_image_urls and has_embeddable:
+                    content = _build_multimodal_content(
+                        header, content_text, msg_image_urls,
+                        url_to_path, embeddable_urls,
+                    )
+                    result.append(Message(
+                        type=ChatMessageEnum.HUMAN,
+                        content=content,
+                    ))
+                else:
+                    result.append(Message(
+                        type=ChatMessageEnum.HUMAN,
+                        content=header + content_text,
+                    ))
+
+        return result
+
+    # ==============================================================
+    # Image download helper
+    # ==============================================================
+
+    @staticmethod
+    def _lookup_history_images(
+        recent_messages: list[dict],
+    ) -> dict[str, str]:
+        """Look up already-cached images for recent messages (no network I/O).
+
+        Phase E downloads images when messages first arrive (URLs are fresh).
+        Here we only check the local cache — expired CDN URLs are never hit.
+        """
+        from qq_social_bot_app.intelligence.social_memory.image_cache import (
+            lookup_cached_images,
+        )
+        scope = recent_messages[-_IMAGE_DOWNLOAD_SCOPE:]
+        urls: list[str] = []
+        for m in scope:
+            urls.extend(m.get('image_urls') or [])
+        if not urls:
+            return {}
+        return lookup_cached_images(urls)
+
+    # ==============================================================
     # Async private helpers
     # ==============================================================
 
@@ -221,40 +495,58 @@ class QQSocialAgent(AgentTemplate):
             for msg in messages:
                 await memory.async_add_group_message(msg)
 
-    async def _async_judge_reply_probability(self, agent_input: dict,
-                                             memory: Memory,
-                                             **kwargs) -> float:
+    async def _async_judge_reply_probability(
+        self,
+        agent_input: dict,
+        chat_messages: list[Message],
+        memory: Memory,
+        **kwargs,
+    ) -> float:
+        """Judge reply probability using individual messages + images."""
+        from agentuniverse.llm.transfer_utils import au_messages_to_openai
+
         core_persona = agent_input.get('core_persona', '')
-        chat_history = agent_input.get('chat_history', '')
         social_context = agent_input.get('social_context', '')
         current_topic = agent_input.get('current_topic', '')
         current_time = agent_input.get('current_time', '')
 
         # Load prompt from YAML via PromptManager
-        prompt_obj = PromptManager().get_instance_obj('qq_social_agent.probability_judge')
+        prompt_obj = PromptManager().get_instance_obj(
+            'qq_social_agent.probability_judge')
         if prompt_obj:
             introduction = getattr(prompt_obj, 'introduction', '') or ''
             instruction = getattr(prompt_obj, 'instruction', '') or ''
-            system_prompt = introduction.format(core_persona=core_persona).rstrip()
+            system_prompt = introduction.format(
+                core_persona=core_persona).rstrip()
             user_content = instruction.format(
                 current_time=current_time or '',
                 current_topic=current_topic or '',
                 social_context=social_context or '',
-                chat_history=chat_history or '',
             )
         else:
             logger.warning('probability_judge prompt not found, using fallback')
             system_prompt = core_persona
-            user_content = f'当前时间：{current_time}\n当前话题：{current_topic}\n聊天记录：\n{chat_history}'
+            user_content = (
+                f'当前时间：{current_time}\n当前话题：{current_topic}\n'
+                f'社交记忆：\n{social_context}'
+            )
+
+        # Convert Message objects → OpenAI dicts for manual LLM call
+        chat_openai = au_messages_to_openai(chat_messages)
 
         llm_messages = [
-            {'role': 'system', 'content': system_prompt},
+            {'role': 'system', 'content': [
+                {'type': 'text', 'text': system_prompt,
+                 'cache_control': {'type': 'ephemeral'}},
+            ]},
+            *chat_openai,
             {'role': 'user', 'content': user_content},
         ]
 
         profile = self.agent_model.profile or {}
         llm_name = profile.get('llm_model', {}).get('name', '')
-        llm = LLMManager().get_instance_obj(llm_name) if llm_name else self.process_llm(**kwargs)
+        llm = (LLMManager().get_instance_obj(llm_name)
+               if llm_name else self.process_llm(**kwargs))
 
         try:
             output = await llm.acall(messages=llm_messages, streaming=False)

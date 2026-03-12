@@ -6,6 +6,7 @@ from collections import deque
 from datetime import datetime
 
 from agentuniverse.agent.agent_manager import AgentManager
+from agentuniverse.base.context.mcp_session_manager import MCPSessionManager
 from websockets.exceptions import ConnectionClosed
 
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
@@ -90,7 +91,8 @@ async def run_agent_async(agent, messages: list[GroupMessage],
     if image_local_paths:
         kwargs['image_urls'] = image_local_paths
 
-    output = await agent.async_run(**kwargs)
+    async with MCPSessionManager().async_session_scope():
+        output = await agent.async_run(**kwargs)
     return output.get_data("output", "")
 
 

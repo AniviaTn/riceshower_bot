@@ -38,7 +38,9 @@ class MarkdownMemoryService:
     def _assert_writable(rel_path: str) -> None:
         """Raise if the path is in a read-only zone."""
         if rel_path.startswith('persona/') or rel_path.startswith('persona\\'):
-            raise PermissionError(f'Cannot write to persona/ directory: {rel_path}')
+            # 只允许写 long_term_memory.md，其他 persona 文件只读
+            if os.path.basename(rel_path) != 'long_term_memory.md':
+                raise PermissionError(f'Cannot write to protected persona file: {rel_path}')
 
     # ----------------------------------------------------------
     # CRUD

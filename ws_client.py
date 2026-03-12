@@ -9,6 +9,14 @@ import sys
 
 os.environ.setdefault('ANONYMIZED_TELEMETRY', 'False')
 
+# Ensure nvm-managed Node.js is first on PATH (PyCharm Run/Debug doesn't load shell profile,
+# and /usr/local/bin may contain an outdated Node v14 that gets picked up instead).
+_NVM_NODE_BIN = os.path.expanduser('~/.nvm/versions/node/v22.22.0/bin')
+if os.path.isdir(_NVM_NODE_BIN):
+    _path = os.environ.get('PATH', '')
+    _parts = [p for p in _path.split(':') if p != _NVM_NODE_BIN]
+    os.environ['PATH'] = _NVM_NODE_BIN + ':' + ':'.join(_parts)
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 

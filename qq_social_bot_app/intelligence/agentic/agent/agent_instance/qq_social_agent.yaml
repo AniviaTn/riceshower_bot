@@ -16,9 +16,13 @@ action:
     - 'memory_read'
     - 'memory_write'
     - 'search_chat_history_tool'
+    - 'edit_persona_memory'
   toolkit: []
   skill:
     - 'agent-browser'
+    - 'yingmi-finance'
+    - 'find-skills'
+    - 'china-stock-analysis'
 memory:
   name: 'qq_social_memory'
 meta_class: qq_social_bot_app.intelligence.agentic.agent.agent_instance.qq_social_agent.QQSocialAgent
