@@ -110,6 +110,24 @@ class IDMappingService:
 
         self._user_name_cache[qq_id] = display_name
 
+    def get_qq_id_by_name(self, display_name: str) -> str | None:
+        """Reverse lookup: find QQ ID by display name.
+
+        Searches in-memory cache first, falls back to SQLite.
+        If multiple users share the same name, returns the most recently updated.
+        """
+        # Fast path: search in-memory cache
+        for qq_id, name in self._user_name_cache.items():
+            if name == display_name:
+                return qq_id
+        # Fallback to SQLite (ordered by updated_at DESC for most recent)
+        row = self._conn.execute(
+            'SELECT qq_id FROM user_mappings WHERE display_name = ? '
+            'ORDER BY updated_at DESC LIMIT 1',
+            (display_name,),
+        ).fetchone()
+        return row[0] if row else None
+
     def get_all_user_mappings(self) -> dict[str, str]:
         """Return {qq_id: display_name} for all known users."""
         rows = self._conn.execute(
@@ -204,21 +222,21 @@ class IDMappingService:
     # ----------------------------------------------------------
 
     def resolve_ids_in_text(self, text: str) -> str:
-        """Replace QQ number patterns in text with display names.
+        """Replace @QQ号 patterns in text with @显示名.
 
-        Matches patterns like [HH:MM] 12345678: or sender_id references.
+        Only matches QQ numbers preceded by '@' to avoid replacing
+        unrelated numbers in the message.
         """
         mappings = self.get_all_user_mappings()
         if not mappings:
             return text
 
         def _replace(match: re.Match) -> str:
-            qq_id = match.group(0)
+            qq_id = match.group(1)
             name = mappings.get(qq_id)
-            return name if name else qq_id
+            return f'@{name}' if name else match.group(0)
 
-        # Match sequences of 5-12 digits that look like QQ IDs
-        pattern = re.compile(r'\b(\d{5,12})\b')
+        pattern = re.compile(r'@(\d{5,12})\b')
         return pattern.sub(_replace, text)
 
     def close(self):

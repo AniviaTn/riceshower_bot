@@ -11,7 +11,6 @@ profile:
 action:
   tool:
     - 'send_qq_message'
-    - 'zenmux_web_search_tool'
     - 'memory_search'
     - 'memory_read'
     - 'memory_write'
@@ -20,9 +19,8 @@ action:
   toolkit: []
   skill:
     - 'agent-browser'
-    - 'yingmi-finance'
     - 'find-skills'
-    - 'china-stock-analysis'
+    - 'multi-search-engine'
 memory:
   name: 'qq_social_memory'
 meta_class: qq_social_bot_app.intelligence.agentic.agent.agent_instance.qq_social_agent.QQSocialAgent

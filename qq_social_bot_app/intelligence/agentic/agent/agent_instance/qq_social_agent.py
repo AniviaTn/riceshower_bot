@@ -8,22 +8,18 @@ External API is only agent.run() / agent.async_run():
   response = output.get_data('output', '')
 """
 import base64
-import json
 import logging
 import os
-import random
 import time
 
 from agentuniverse.agent.input_object import InputObject
 from agentuniverse.agent.memory.enum import ChatMessageEnum
 from agentuniverse.agent.memory.memory import Memory
-from agentuniverse.agent.memory.message import Message
+from agentuniverse.agent.memory.message import Message, ToolCall
 from agentuniverse.agent.template.agent_template import AgentTemplate
 from agentuniverse.llm.llm import LLM
-from agentuniverse.llm.llm_manager import LLMManager
 from agentuniverse.llm.llm_output import LLMOutput
 from agentuniverse.ai_context.agent_context import AgentContext
-from agentuniverse.prompt.prompt_manager import PromptManager
 
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
 from qq_social_bot_app.intelligence.social_memory.working_memory import (
@@ -232,33 +228,6 @@ class QQSocialAgent(AgentTemplate):
             len(chat_messages), group_id, num_old, num_new,
             len(url_to_path))
 
-        # ---- Phase 3.5: Probability check (only when must_reply=False) ----
-        if not must_reply:
-            probability = await self._async_judge_reply_probability(
-                agent_input, chat_messages, memory, **kwargs)
-
-            prob_floor = bot_config.get_prob_floor()
-            prob_ceil = bot_config.get_prob_ceil()
-
-            if probability <= prob_floor:
-                should_reply = False
-                decision_reason = 'below floor'
-            elif probability >= prob_ceil:
-                should_reply = True
-                decision_reason = 'above ceil'
-            else:
-                roll = random.random()
-                should_reply = roll < probability
-                decision_reason = f'roll={roll:.2f}'
-
-            logger.info(
-                'Probability check for group %s: p=%.2f %s → %s',
-                group_id, probability, decision_reason,
-                'REPLY' if should_reply else 'SKIP')
-
-            if not should_reply:
-                return {'output': ''}
-
         # ---- Phase 4: Run LLM (async) ----
         # Remove keys that should NOT leak into prompt template rendering
         agent_input.pop('chat_history', None)
@@ -414,7 +383,7 @@ class QQSocialAgent(AgentTemplate):
         embeddable_urls = set(embeddable_candidates[-max_images:])
 
         result: list[Message] = []
-        for m in recent_messages:
+        for idx, m in enumerate(recent_messages):
             sender_id = m.get('sender_id', '')
             stored_name = m.get('sender_name', '???')
             ts = format_message_time(m.get('timestamp', 0), now)
@@ -423,11 +392,26 @@ class QQSocialAgent(AgentTemplate):
             is_bot = (sender_id == bot_id)
 
             if is_bot:
-                # Assistant message — plain text, strip stale placeholders
+                # Represent bot's own message as tool_call + tool_result
+                # so the LLM learns to use the send_qq_message tool.
                 clean = content_text.replace('[图片]', '').strip()
+                text = clean or content_text
+                call_id = f'hist_{idx}'
                 result.append(Message(
-                    type=ChatMessageEnum.AI,
-                    content=clean or content_text,
+                    type=ChatMessageEnum.ASSISTANT,
+                    tool_calls=[
+                        ToolCall.create(
+                            id=call_id,
+                            name='send_qq_message',
+                            arguments={'text': text},
+                        )
+                    ],
+                ))
+                result.append(Message(
+                    type=ChatMessageEnum.TOOL,
+                    content='消息发送成功',
+                    tool_call_id=call_id,
+                    name='send_qq_message',
                 ))
             else:
                 # Resolve display name
@@ -494,101 +478,6 @@ class QQSocialAgent(AgentTemplate):
         elif hasattr(memory, 'async_add_group_message'):
             for msg in messages:
                 await memory.async_add_group_message(msg)
-
-    async def _async_judge_reply_probability(
-        self,
-        agent_input: dict,
-        chat_messages: list[Message],
-        memory: Memory,
-        **kwargs,
-    ) -> float:
-        """Judge reply probability using individual messages + images."""
-        from agentuniverse.llm.transfer_utils import au_messages_to_openai
-
-        core_persona = agent_input.get('core_persona', '')
-        social_context = agent_input.get('social_context', '')
-        current_topic = agent_input.get('current_topic', '')
-        current_time = agent_input.get('current_time', '')
-
-        # Load prompt from YAML via PromptManager
-        prompt_obj = PromptManager().get_instance_obj(
-            'qq_social_agent.probability_judge')
-        if prompt_obj:
-            introduction = getattr(prompt_obj, 'introduction', '') or ''
-            instruction = getattr(prompt_obj, 'instruction', '') or ''
-            system_prompt = introduction.format(
-                core_persona=core_persona).rstrip()
-            user_content = instruction.format(
-                current_time=current_time or '',
-                current_topic=current_topic or '',
-                social_context=social_context or '',
-            )
-        else:
-            logger.warning('probability_judge prompt not found, using fallback')
-            system_prompt = core_persona
-            user_content = (
-                f'当前时间：{current_time}\n当前话题：{current_topic}\n'
-                f'社交记忆：\n{social_context}'
-            )
-
-        # Convert Message objects → OpenAI dicts for manual LLM call
-        chat_openai = au_messages_to_openai(chat_messages)
-
-        llm_messages = [
-            {'role': 'system', 'content': [
-                {'type': 'text', 'text': system_prompt,
-                 'cache_control': {'type': 'ephemeral'}},
-            ]},
-            *chat_openai,
-            {'role': 'user', 'content': user_content},
-        ]
-
-        profile = self.agent_model.profile or {}
-        llm_name = profile.get('llm_model', {}).get('name', '')
-        llm = (LLMManager().get_instance_obj(llm_name)
-               if llm_name else self.process_llm(**kwargs))
-
-        try:
-            output = await llm.acall(messages=llm_messages, streaming=False)
-            raw_text = output.text if hasattr(output, 'text') else str(output)
-            probability = self._parse_probability(raw_text)
-        except Exception:
-            logger.exception('Probability judgment LLM call failed')
-            probability = 0.0
-
-        return probability
-
-    @staticmethod
-    def _parse_probability(raw_text: str) -> float:
-        text = raw_text.strip()
-
-        if text.startswith('```'):
-            lines = text.split('\n')
-            lines = [l for l in lines if not l.strip().startswith('```')]
-            text = '\n'.join(lines).strip()
-
-        start = text.find('{')
-        end = text.rfind('}')
-        if start != -1 and end != -1 and end > start:
-            text = text[start:end + 1]
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning('Failed to parse probability output: %s',
-                           raw_text[:200])
-            return 0.0
-
-        prob = parsed.get('probability', 0.0)
-        reason = parsed.get('reason', '')
-        logger.info('Probability judgment: p=%s reason=%s', prob, reason)
-
-        try:
-            prob = float(prob)
-        except (TypeError, ValueError):
-            return 0.0
-
-        return max(0.0, min(1.0, prob))
 
     @staticmethod
     def _format_trigger_messages(triggers: list[GroupMessage]) -> str:

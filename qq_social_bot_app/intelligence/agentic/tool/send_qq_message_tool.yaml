@@ -2,9 +2,14 @@ name: 'send_qq_message'
 description: |
   发送 QQ 消息到当前会话（群聊或私聊）。
   这是你与用户交流的唯一方式——你必须调用此工具来发送回复。
-  如果你决定不回复，就不要调用此工具。
+  如果你不调用该工具，你的输出不会被任何人看到。
+
+  参数说明:
+  - text (必填): 消息内容
+  - at_users (可选): 要@的人，用逗号分隔。可以用昵称（如 "小明,小红"）或QQ号（如 "123456"）。
+    注意：只在群聊中有效，私聊中无效。只在确实需要提醒某人注意时才使用。
 tool_type: 'api'
-input_keys: ['text']
+input_keys: ['text', 'at_users']
 metadata:
   type: 'TOOL'
   module: 'qq_social_bot_app.intelligence.agentic.tool.send_qq_message_tool'

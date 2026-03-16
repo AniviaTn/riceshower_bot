@@ -201,17 +201,24 @@ async def handler(websocket) -> None:
             if BOT_QQ_ID is None and "self_id" in evt:
                 BOT_QQ_ID = evt["self_id"]
                 print(f"[{now_str()}] Bot QQ ID detected: {BOT_QQ_ID}")
+                try:
+                    id_svc = get_id_mapping_service()
+                    id_svc.set_user_name(str(BOT_QQ_ID), bot_names[0] if bot_names else "bot")
+                except Exception:
+                    pass
 
             # ---- Private message: direct agent call, must_reply=True ----
             if is_private_message(evt):
                 msg = evt_to_private_message(evt, BOT_QQ_ID, bot_id)
-                print(f"[{now_str()}] [PRIVATE] user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 
                 try:
                     id_svc = get_id_mapping_service()
                     id_svc.set_user_name(msg.sender_id, msg.sender_name)
+                    msg.content = id_svc.resolve_ids_in_text(msg.content)
                 except Exception:
                     pass
+
+                print(f"[{now_str()}] [PRIVATE] user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 
                 try:
                     await run_agent_async(
@@ -229,13 +236,18 @@ async def handler(websocket) -> None:
             if is_group_message(evt):
                 msg = evt_to_group_message(evt, BOT_QQ_ID, bot_id)
                 group_id = msg.group_id
-                print(f"[{now_str()}] [GROUP] group={group_id} user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 
                 try:
                     id_svc = get_id_mapping_service()
                     id_svc.set_user_name(msg.sender_id, msg.sender_name)
-                except Exception:
-                    pass
+                    old = msg.content
+                    msg.content = id_svc.resolve_ids_in_text(msg.content)
+                    if old != msg.content:
+                        print(f"[{now_str()}] [ID RESOLVE] {old} -> {msg.content}")
+                except Exception as e:
+                    print(f"[{now_str()}] [ID RESOLVE ERROR] {e!r}")
+
+                print(f"[{now_str()}] [GROUP] group={group_id} user={msg.sender_id}({msg.sender_name}) text={msg.content}")
 
                 group_buffers.setdefault(group_id, []).append(msg)
 

@@ -2,6 +2,7 @@
 """send_qq_message tool – lets the agent send QQ messages via OneBot."""
 
 import logging
+import re
 import time
 from typing import Optional
 
@@ -10,6 +11,8 @@ from agentuniverse.agent.action.tool.tool import Tool
 from qq_social_bot_app.intelligence.social_memory.models import GroupMessage
 
 logger = logging.getLogger(__name__)
+
+_QQ_ID_PATTERN = re.compile(r'^\d{5,12}$')
 
 
 class SendQQMessageTool(Tool):
@@ -32,7 +35,7 @@ class SendQQMessageTool(Tool):
         self,
         text: str,
         reply_to: Optional[str] = None,
-        at_user_ids: Optional[str] = None,
+        at_users: Optional[str] = None,
         agent_context=None,
     ) -> str:
         if not agent_context:
@@ -47,10 +50,11 @@ class SendQQMessageTool(Tool):
         group_id = extra.get("send_target_group_id")
         user_id = extra.get("send_target_user_id")
 
-        # Parse at_user_ids from comma-separated string
+        # Parse at_users from comma-separated string and resolve nicknames to QQ IDs
         at_list: list[str] | None = None
-        if at_user_ids:
-            at_list = [uid.strip() for uid in at_user_ids.split(",") if uid.strip()]
+        if at_users:
+            raw = [u.strip() for u in at_users.split(",") if u.strip()]
+            at_list = self._resolve_at_users(raw)
 
         try:
             if scene == "group":
@@ -85,6 +89,31 @@ class SendQQMessageTool(Tool):
         await self._record_bot_message(extra, scene, group_id, user_id, text, mid)
 
         return "Message sent successfully."
+
+    @staticmethod
+    def _resolve_at_users(raw_users: list[str]) -> list[str]:
+        """Resolve a list of nicknames or QQ IDs to QQ IDs.
+
+        Each entry is either:
+          - A pure numeric QQ ID (5-12 digits) → used as-is
+          - A display name → resolved via IDMappingService
+        Unresolvable names are silently dropped with a warning.
+        """
+        from qq_social_bot_app.intelligence.social_memory.memory_services import (
+            get_id_mapping_service,
+        )
+        id_mapping = get_id_mapping_service()
+        resolved: list[str] = []
+        for entry in raw_users:
+            if _QQ_ID_PATTERN.match(entry):
+                resolved.append(entry)
+            else:
+                qq_id = id_mapping.get_qq_id_by_name(entry)
+                if qq_id:
+                    resolved.append(qq_id)
+                else:
+                    logger.warning('Cannot resolve at-user "%s" to QQ ID, skipping', entry)
+        return resolved or None
 
     @staticmethod
     async def _record_bot_message(extra: dict, scene: str,
